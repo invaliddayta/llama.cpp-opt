@@ -4,7 +4,7 @@
 #endif
 #include <cstdint>
 
-namespace gpu_rng_lab {
+namespace ggml_cuda_rng {
 
 __host__ __device__ inline uint32_t multiply_high(uint32_t a, uint32_t b) {
 #if defined(__CUDA_ARCH__)
@@ -33,10 +33,4 @@ __host__ __device__ inline float uniform(uint64_t counter, uint64_t seed) {
     return (philox(counter, seed).x >> 8) * (1.0f / 16777216.0f);
 }
 
-static __global__ void generate(uint64_t seed, uint64_t begin, float * output, int count) {
-    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < count; i += gridDim.x * blockDim.x) {
-        output[i] = uniform(begin + (uint64_t) i, seed);
-    }
-}
-
-} // namespace gpu_rng_lab
+} // namespace ggml_cuda_rng

@@ -11,7 +11,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace gpu_grammar_lab {
+namespace ggml_gpu_grammar {
 
 static_assert(char_terminal == LLAMA_GRETYPE_CHAR && any_terminal == LLAMA_GRETYPE_CHAR_ANY, "grammar terminal layout mismatch");
 
@@ -42,21 +42,21 @@ inline dfa_host compile(llama_grammar & grammar, size_t max_states = 16384) {
     for (size_t rule_id = 0; rule_id < grammar.rules.size(); ++rule_id) {
         const auto & rule = grammar.rules[rule_id];
         for (size_t i = 0; i < rule.size(); ++i) {
-        const auto & elem = rule[i];
-        if (elements.size() >= 200000) throw std::runtime_error("GPU grammar element limit exceeded");
-        rule_of[&elem] = rule_id;
-        indices[&elem] = (int32_t) elements.size();
-        elements.push_back(&elem);
-        if (elem.type == LLAMA_GRETYPE_RULE_REF) {
-            if (elem.value >= grammar.rules.size() || i + 1 >= rule.size()) throw std::runtime_error("invalid rule reference");
-            const bool growing = rule[i + 1].type != LLAMA_GRETYPE_END && rule[i + 1].type != LLAMA_GRETYPE_ALT;
-            edges[rule_id].push_back({elem.value, growing});
-        }
-        if (elem.type == LLAMA_GRETYPE_CHAR || elem.type == LLAMA_GRETYPE_CHAR_NOT ||
-                elem.type == LLAMA_GRETYPE_CHAR_ALT || elem.type == LLAMA_GRETYPE_CHAR_RNG_UPPER) {
-            out.classes.push_back(elem.value);
-            if (elem.value < UINT32_MAX) out.classes.push_back(elem.value + 1);
-        }
+            const auto & elem = rule[i];
+            if (elements.size() >= 200000) throw std::runtime_error("GPU grammar element limit exceeded");
+            rule_of[&elem] = rule_id;
+            indices[&elem] = (int32_t) elements.size();
+            elements.push_back(&elem);
+            if (elem.type == LLAMA_GRETYPE_RULE_REF) {
+                if (elem.value >= grammar.rules.size() || i + 1 >= rule.size()) throw std::runtime_error("invalid rule reference");
+                const bool growing = rule[i + 1].type != LLAMA_GRETYPE_END && rule[i + 1].type != LLAMA_GRETYPE_ALT;
+                edges[rule_id].push_back({elem.value, growing});
+            }
+            if (elem.type == LLAMA_GRETYPE_CHAR || elem.type == LLAMA_GRETYPE_CHAR_NOT ||
+                    elem.type == LLAMA_GRETYPE_CHAR_ALT || elem.type == LLAMA_GRETYPE_CHAR_RNG_UPPER) {
+                out.classes.push_back(elem.value);
+                if (elem.value < UINT32_MAX) out.classes.push_back(elem.value + 1);
+            }
         }
     }
     std::vector<bool> reachable(grammar.rules.size(), false);
@@ -114,7 +114,7 @@ inline dfa_host compile(llama_grammar & grammar, size_t max_states = 16384) {
         const auto found = seen.find(candidate);
         if (found != seen.end()) return found->second;
         if (out.stacks.size() >= max_states || out.stacks.size() * out.classes.size() >= 8000000) {
-            throw std::runtime_error("grammar is not a bounded DFA; refusing approximation/CPU fallback");
+            throw std::runtime_error("grammar exceeds the GPU DFA state/table limits");
         }
         size_t entries = 0;
         for (const auto & row : candidate) {
@@ -239,4 +239,4 @@ inline dfa_host compile(llama_grammar & grammar, size_t max_states = 16384) {
     return out;
 }
 
-} // namespace gpu_grammar_lab
+} // namespace ggml_gpu_grammar

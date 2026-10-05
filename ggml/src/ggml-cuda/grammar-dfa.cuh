@@ -2,7 +2,7 @@
 #include "../ggml-gpu-grammar.h"
 #include <cmath>
 
-namespace gpu_grammar_lab {
+namespace ggml_gpu_grammar {
 
 __device__ inline int32_t advance_char(const dfa_device & dfa, int32_t node, uint32_t character) {
     if (node < 0 || node >= dfa.n_states) return -1;
@@ -88,21 +88,4 @@ __device__ inline state consume_accepted(const dfa_device & dfa, state current, 
     return consume(dfa, current, piece);
 }
 
-static __global__ void mask(const dfa_device dfa, const state * current, const char * pieces,
-        const uint32_t * offsets, const int32_t * eog, const float * logits, float * output, int count) {
-    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < count; i += gridDim.x * blockDim.x) {
-        output[i] = allowed(dfa, *current, pieces + offsets[i], eog[i]) ? logits[i] : -INFINITY;
-    }
-}
-
-static __global__ void accept(const dfa_device dfa, state * current, const char * pieces,
-        const uint32_t * offsets, const int32_t * eog, int32_t token) {
-    if (threadIdx.x != 0 || blockIdx.x != 0) return;
-    if (!allowed(dfa, *current, pieces + offsets[token], eog[token])) {
-        current->error = 1;
-        return;
-    }
-    if (!eog[token]) *current = consume_accepted(dfa, *current, pieces + offsets[token]);
-}
-
-} // namespace gpu_grammar_lab
+} // namespace ggml_gpu_grammar

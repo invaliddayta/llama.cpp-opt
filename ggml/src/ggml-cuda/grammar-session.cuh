@@ -1,7 +1,7 @@
 #pragma once
 #include "grammar-dfa.cuh"
 
-namespace gpu_grammar_lab {
+namespace ggml_gpu_grammar {
 
 __device__ inline bool match_token(const token_pattern & pattern, int32_t token, int32_t & position) {
     if (pattern.size == 0) return false;
@@ -92,19 +92,4 @@ __device__ inline void session_prepare_impl(const dfa_device dfa, const session_
     }
 }
 
-static __global__ void session_prepare(const dfa_device dfa, const session_config config,
-        session_state * base, session_state * working, const int32_t * pending, const int32_t * previous,
-        const char * pieces, const uint32_t * offsets, const int32_t * eog, int count) {
-    if (!threadIdx.x && !blockIdx.x) session_prepare_impl(dfa, config, base, working, pending, previous, pieces, offsets, eog, count);
-}
-
-static __global__ void session_mask(const dfa_device dfa, const session_state * current,
-        const char * pieces, const uint32_t * offsets, const int32_t * eog, const float * logits, float * output, int count) {
-    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < count; i += gridDim.x * blockDim.x) {
-        const bool passthrough = current->thinking || current->awaiting_trigger;
-        output[i] = !current->grammar.error && (passthrough || allowed(dfa, current->grammar, pieces + offsets[i], eog[i]))
-                ? logits[i] : -INFINITY;
-    }
-}
-
-} // namespace gpu_grammar_lab
+} // namespace ggml_gpu_grammar

@@ -3,7 +3,7 @@
 #include "grammar-session.cuh"
 #include "philox.cuh"
 
-namespace gpu_grammar_lab {
+namespace ggml_gpu_grammar {
 
 template<class T> __device__ inline const T * part(const char * bytes, uint32_t offset) {
     return reinterpret_cast<const T *>(bytes + offset);
@@ -59,7 +59,7 @@ static __global__ void mask_packed(const char * bytes, const persistent_state * 
 static __global__ void uniform_packed(const char * bytes, const persistent_state * current, float * output) {
     if (!threadIdx.x && !blockIdx.x) {
         const auto & h = *reinterpret_cast<const packed_header *>(bytes);
-        *output = gpu_rng_lab::uniform(current->working.draws, h.seed);
+        *output = ggml_cuda_rng::uniform(current->working.draws, h.seed);
     }
 }
 
@@ -70,31 +70,31 @@ static __global__ void check_sample(const int32_t * sampled, const persistent_st
     *output = !current->working.grammar.error && token >= 0 && token < n_vocab && isfinite(*final_logit) ? token : -1;
 }
 
-} // namespace gpu_grammar_lab
+} // namespace ggml_gpu_grammar
 
 static void ggml_cuda_op_grammar_mask(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const auto * tables = dst->src[1];
     auto * state = dst->src[2];
     const auto * pending = dst->src[3];
     const auto * previous = dst->src[4];
-    GGML_ASSERT(ggml_nbytes(state) == sizeof(gpu_grammar_lab::persistent_state));
-    GGML_ASSERT(ggml_nbytes(pending) == (gpu_grammar_lab::max_pending_tokens + 4) * sizeof(int32_t));
-    gpu_grammar_lab::prepare_packed<<<1, 1, 0, ctx.stream()>>>((const char *) tables->data,
-        (gpu_grammar_lab::persistent_state *) state->data, (const int32_t *) pending->data,
+    GGML_ASSERT(ggml_nbytes(state) == sizeof(ggml_gpu_grammar::persistent_state));
+    GGML_ASSERT(ggml_nbytes(pending) == (ggml_gpu_grammar::max_pending_tokens + 4) * sizeof(int32_t));
+    ggml_gpu_grammar::prepare_packed<<<1, 1, 0, ctx.stream()>>>((const char *) tables->data,
+        (ggml_gpu_grammar::persistent_state *) state->data, (const int32_t *) pending->data,
         previous ? (const int32_t *) previous->data : nullptr);
     const int count = ggml_nelements(dst);
-    gpu_grammar_lab::mask_packed<<<std::min(1024, (count + 127) / 128), 128, 0, ctx.stream()>>>(
-        (const char *) tables->data, (const gpu_grammar_lab::persistent_state *) state->data,
+    ggml_gpu_grammar::mask_packed<<<std::min(1024, (count + 127) / 128), 128, 0, ctx.stream()>>>(
+        (const char *) tables->data, (const ggml_gpu_grammar::persistent_state *) state->data,
         (const float *) dst->src[0]->data, (float *) dst->data, count);
 }
 
 static void ggml_cuda_op_gpu_uniform(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    gpu_grammar_lab::uniform_packed<<<1, 1, 0, ctx.stream()>>>((const char *) dst->src[1]->data,
-        (const gpu_grammar_lab::persistent_state *) dst->src[2]->data, (float *) dst->data);
+    ggml_gpu_grammar::uniform_packed<<<1, 1, 0, ctx.stream()>>>((const char *) dst->src[1]->data,
+        (const ggml_gpu_grammar::persistent_state *) dst->src[2]->data, (float *) dst->data);
 }
 
 static void ggml_cuda_op_gpu_sample_check(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    gpu_grammar_lab::check_sample<<<1, 1, 0, ctx.stream()>>>((const int32_t *) dst->src[0]->data,
-        (const gpu_grammar_lab::persistent_state *) dst->src[1]->data, (const float *) dst->src[2]->data,
+    ggml_gpu_grammar::check_sample<<<1, 1, 0, ctx.stream()>>>((const int32_t *) dst->src[0]->data,
+        (const ggml_gpu_grammar::persistent_state *) dst->src[1]->data, (const float *) dst->src[2]->data,
         (int32_t *) dst->data, ggml_get_op_params_i32(dst, 0));
 }

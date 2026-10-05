@@ -1081,7 +1081,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         if ((gpu_sampling || (gpu_select && std::atoi(gpu_select) != 0)) && is_dflash2) {
             GGML_ASSERT(n_seq == 1 && this->params.p_min == 0.0f);
             dflash2_gpu_select = llama_set_dflash2_gpu_select(ctx_dft, this->params.n_max + 1);
-            GGML_ASSERT(dflash2_gpu_select && "DFlash2 GPU selector unavailable; refusing CPU fallback");
+            GGML_ASSERT(dflash2_gpu_select && "DFlash2 GPU selector unavailable");
             LOG_INF("%s: DFlash2 GPU selector enabled\n", __func__);
         }
     }

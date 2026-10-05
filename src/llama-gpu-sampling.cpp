@@ -10,7 +10,7 @@
 #include <mutex>
 #include <random>
 
-using namespace gpu_grammar_lab;
+using namespace ggml_gpu_grammar;
 
 static std::atomic<bool> gpu_sampling_active{true};
 

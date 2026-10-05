@@ -829,7 +829,7 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
             if (ggml_cuda_fattn_use_q4_mma(ctx.device, dst)) {
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
                 static const bool reported = [] {
-                    fprintf(stderr, "ggml_cuda_flash_attn_ext: fused q4_0 MMA enabled for sm86 256/8/24/4\n");
+                    GGML_LOG_INFO("%s: using fused q4_0 MMA flash attention\n", __func__);
                     return true;
                 }();
                 GGML_UNUSED(reported);

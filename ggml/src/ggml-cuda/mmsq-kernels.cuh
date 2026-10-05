@@ -6,7 +6,7 @@
 // x: activations quantized to int8 with one scale per 256 values (q8_K granularity), in mma fragment order.
 // Each warp dequantizes a 16x256 weight tile once and feeds int8 tensor-core mma for all N columns.
 //
-// Header-only so it can be used by the standalone lab and by ggml-cuda.
+// Header-only, so the standalone kernel lab can include it.
 
 #pragma once
 
@@ -159,12 +159,7 @@ __device__ __forceinline__ int2 lut16(const uint32_t q4, const uint32_t * t) {
     return make_int2(__byte_perm(tmp[0], tmp[1], 0x6420), __byte_perm(tmp[0], tmp[1], 0x7531));
 }
 
-// ---------------------------------------------------------------------------------------------
-// per-type super-block handling. Each type provides:
-//   BLK, CP16 (row runs are 16B-aligned), ROW_ALIGN_BYTES
-//   struct rowdata; load(rowdata &, const uint8_t * blk)            per-row super-block header
-//   accumulate<NT>(isum, imin, blk0, blk1, rd0, rd1, bq, ssum)       all 8 k32 steps of the super-block
-//   finish: acc += dy * (d * isum - dmin * imin)
+// per-type super-block size, 16B copy alignment, and whether the type has mins
 
 enum class qtype { iq4_xs, q4_K, q5_K, q6_K };
 
@@ -462,13 +457,11 @@ mul_mat(const uint8_t * __restrict__ W, const int64_t row_bytes, const uint8_t *
     const int r_lo = lane / 4;
     const int nlo  = (lane % 4) * 2;
 
-#ifndef MMSQ_NO_XPREFETCH
     uint2  bq[NT][8];
     float2 dy[NT];
     uint32_t ssw[NT][8];
     uint32_t shw[NT];
     if (sb_beg + kw < sb_end) load_x(bq, dy, ssw, shw, sb_beg + kw);
-#endif
 
     for (int step = 0; step < nsteps; ++step) {
         cp_async_wait<STAGES - 2>();
@@ -482,20 +475,12 @@ mul_mat(const uint8_t * __restrict__ W, const int64_t row_bytes, const uint8_t *
         const uint8_t * blk0 = st + r_lo * C::ROWB + kw * BLK;
         const uint8_t * blk1 = blk0 + 8 * C::ROWB;
 
-#ifdef MMSQ_NO_XPREFETCH
-        uint2  bq[NT][8];
-        float2 dy[NT];
-        uint32_t ssw[NT][8];
-        uint32_t shw[NT];
-        load_x(bq, dy, ssw, shw, sb);
-#else
         uint2  bqn[NT][8];
         float2 dyn[NT];
         uint32_t sswn[NT][8];
         uint32_t shwn[NT];
         const bool has_next = sb + KW < sb_end;
         if (has_next) load_x(bqn, dyn, sswn, shwn, sb + KW);
-#endif
         int isum[NT][4], imin[NT][4];
 #pragma unroll
         for (int t = 0; t < NT; ++t)
@@ -517,7 +502,6 @@ mul_mat(const uint8_t * __restrict__ W, const int64_t row_bytes, const uint8_t *
                 acc[t][3] += dy[t].y * dsc[1] * (float) isum[t][3];
             }
         }
-#ifndef MMSQ_NO_XPREFETCH
         if (has_next) {
 #pragma unroll
             for (int t = 0; t < NT; ++t) {
@@ -527,7 +511,6 @@ mul_mat(const uint8_t * __restrict__ W, const int64_t row_bytes, const uint8_t *
                 for (int j = 0; j < 8; ++j) { bq[t][j] = bqn[t][j]; ssw[t][j] = sswn[t][j]; }
             }
         }
-#endif
     }
     cp_async_wait<0>();
 

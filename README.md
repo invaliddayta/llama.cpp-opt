@@ -4,7 +4,7 @@
 
 <p align="center">
   <strong>A llama.cpp fork that verifies 8 draft tokens in 33 ms instead of 54.</strong><br>
-  Qwen3.8-27B + DFlash2 speculative decoding on one RTX 3090, same output as before every kernel change.
+  Qwen3.8-27B + DFlash2 speculative decoding on one RTX 3090. Kernel changes keep the output bit-identical.
 </p>
 
 <p align="center">
@@ -16,7 +16,7 @@
 </p>
 
 This is [llama.cpp](https://github.com/ggml-org/llama.cpp) at upstream `8df332de1` (tag
-`upstream-base`) plus a short, linear series of commits on `opt/main`. They target one setup:
+`upstream-base`) plus a linear series of commits on `opt/main`. They target one setup:
 a 27B hybrid Gated-DeltaNet/attention model (Qwen3.8-27B, IQ4_XS) drafting with DFlash2 on an
 RTX 3090, verifying 8 tokens per step at long context. On that setup a verify step drops from
 ~54 ms to ~33 ms.

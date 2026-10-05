@@ -1802,7 +1802,8 @@ private:
             use_backend_sampling &= !need_pre_sample_logits;
 
             // GPU sampling serves a subset of requests; others use standard sampling
-            llama_gpu_sampling_set_active(llama_gpu_sampling_available());
+            // the active flag is process-wide, so a fallback in one slot would affect the others
+            llama_gpu_sampling_set_active(llama_gpu_sampling_available() && params_base.n_parallel == 1);
             while (true) {
                 try {
                     slot.smpl.reset(common_sampler_init(model_tgt, task.params.sampling));

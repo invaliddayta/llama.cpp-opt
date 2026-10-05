@@ -1,7 +1,7 @@
 #pragma once
 #include <cstdint>
 
-namespace gpu_grammar_lab {
+namespace ggml_gpu_grammar {
 
 constexpr int char_terminal = 3;
 constexpr int any_terminal = 7;
@@ -51,4 +51,4 @@ struct packed_header {
     int32_t n_reasoning_end;
 };
 
-} // namespace gpu_grammar_lab
+} // namespace ggml_gpu_grammar

@@ -108,15 +108,12 @@ top_k_small_pass2(const float * __restrict__ cand_v, const int * __restrict__ ca
     }
 }
 
-// ------------------------- new: histogram selection -------------------------
+// histogram selection
 // pass A: S blocks per row histogram the top byte of the orderable key (warp-private bins, global flush)
 // pass B: S blocks per row collect candidates above/at the boundary bucket into a global pool
 // pass C: filter the second-byte bucket, then sort or use repeated max selection on overflow.
 constexpr int HS_THREADS = 256;
-#ifndef HS_SPLITS_DEF
-#define HS_SPLITS_DEF 32
-#endif
-constexpr int HS_SPLITS  = HS_SPLITS_DEF;
+constexpr int HS_SPLITS  = 32;
 constexpr int HS_HEAD    = 64;     // head slots per row (elements above the bucket, < k)
 constexpr int HS_CAP     = 4032;   // boundary-bucket candidates per row; HS_HEAD + HS_CAP is a power of two
 
