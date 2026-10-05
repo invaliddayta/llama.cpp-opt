@@ -22,30 +22,16 @@ constexpr int QK = 256;
 //   [0, 2048)      8 x 256 B int8 quants, B-fragment order: lane l -> col l/4, k = 32j + (l%4)*4 + {0..3, 16..19}
 //   [2048, 2080)   8 float scales u (one per column)
 //   [2080, 2208)   8 x 8 int16 sums of each 32-block in units of u (index [j][col]) for k-quant mins
-//   [2208, 2224)   4 x uint32 per column pair: 2-bit shift e of each 32-block, bits [4j + 2*(col%2)]
+//   [2208, 2224)   8 x uint16 per column: 2-bit shift e of each 32-block j at bits [2j]
 // A 32-block is stored with step u << e (e in 0..3), so small blocks keep more precision than one scale per 256.
 constexpr int FSB = 2048 + 32 + 128 + 16;
 
-__global__ void quantize_x(const float * __restrict__ x, uint8_t * __restrict__ y, const int K, const int N, const int64_t stride_col) {
-    const int sb   = blockIdx.x;
-    const int t    = blockIdx.y;
-    const int lane = threadIdx.x;
-    const int col  = t * 8 + lane / 4;
-    const int c4   = (lane % 4) * 4;
-    float v[8][8];
+// Quantize one column's super-block. 4 consecutive lanes hold a column (this lane: 64 values in v, l4 = lane % 4).
+// All 32 lanes must call this together; lanes with active == false only take part in the shuffles.
+__device__ __forceinline__ void quantize_sb_col(const float (&v)[8][8], uint8_t * blk, const int col, const int l4, const bool active = true) {
     float amax = 0.0f;
 #pragma unroll
     for (int j = 0; j < 8; ++j) {
-        const float * src = x + (int64_t) col * stride_col + sb * QK + 32 * j;
-        if (col < N) {
-            const float4 a = *(const float4 *) (src + c4);
-            const float4 b = *(const float4 *) (src + 16 + c4);
-            v[j][0] = a.x; v[j][1] = a.y; v[j][2] = a.z; v[j][3] = a.w;
-            v[j][4] = b.x; v[j][5] = b.y; v[j][6] = b.z; v[j][7] = b.w;
-        } else {
-#pragma unroll
-            for (int i = 0; i < 8; ++i) v[j][i] = 0.0f;
-        }
 #pragma unroll
         for (int i = 0; i < 8; ++i) amax = fmaxf(amax, fabsf(v[j][i]));
     }
@@ -53,7 +39,6 @@ __global__ void quantize_x(const float * __restrict__ x, uint8_t * __restrict__ 
     amax = fmaxf(amax, __shfl_xor_sync(0xffffffff, amax, 2));
     const float d  = amax / 127.0f;
     const float id = d > 0.0f ? 1.0f / d : 0.0f;
-    uint8_t * blk = y + ((int64_t) t * (K / QK) + sb) * FSB;
     uint32_t ebits = 0;
 #pragma unroll
     for (int j = 0; j < 8; ++j) {
@@ -78,22 +63,47 @@ __global__ void quantize_x(const float * __restrict__ x, uint8_t * __restrict__ 
             w0 |= (uint32_t) (uint8_t) (int8_t) q0 << (8 * i);
             w1 |= (uint32_t) (uint8_t) (int8_t) q1 << (8 * i);
         }
-        ((uint2 *) (blk + 256 * j))[lane] = make_uint2(w0, w1);
+        if (active) {
+            ((uint2 *) (blk + 256 * j))[col * 4 + l4] = make_uint2(w0, w1);
+        }
         s += __shfl_xor_sync(0xffffffff, s, 1);
         s += __shfl_xor_sync(0xffffffff, s, 2);
-        if (lane % 4 == 0) {
-            ((int16_t *) (blk + 2080))[j * 8 + lane / 4] = (int16_t) (s << e);
+        if (active && l4 == 0) {
+            ((int16_t *) (blk + 2080))[j * 8 + col] = (int16_t) (s << e);
         }
-        ebits |= (uint32_t) e << (4 * j);
+        ebits |= (uint32_t) e << (2 * j);
     }
-    // merge the shift bits of the two columns of each pair
-    const uint32_t other = __shfl_down_sync(0xffffffff, ebits, 4);
-    if (lane % 8 == 0) {
-        ((uint32_t *) (blk + 2208))[lane / 8] = ebits | (other << 2);
+    if (active && l4 == 0) {
+        ((uint16_t *) (blk + 2208))[col] = (uint16_t) ebits;
+        ((float *) (blk + 2048))[col] = d / 8.0f;
     }
-    if (lane % 4 == 0) {
-        ((float *) (blk + 2048))[lane / 4] = d / 8.0f;
+}
+
+// load this lane's 64 values of a column super-block (zeros for padded columns)
+__device__ __forceinline__ void load_sb_col(float (&v)[8][8], const float * src, const bool valid, const int l4) {
+    const int c4 = l4 * 4;
+#pragma unroll
+    for (int j = 0; j < 8; ++j) {
+        if (valid) {
+            const float4 a = *(const float4 *) (src + 32 * j + c4);
+            const float4 b = *(const float4 *) (src + 32 * j + 16 + c4);
+            v[j][0] = a.x; v[j][1] = a.y; v[j][2] = a.z; v[j][3] = a.w;
+            v[j][4] = b.x; v[j][5] = b.y; v[j][6] = b.z; v[j][7] = b.w;
+        } else {
+#pragma unroll
+            for (int i = 0; i < 8; ++i) v[j][i] = 0.0f;
+        }
     }
+}
+
+__global__ void quantize_x(const float * __restrict__ x, uint8_t * __restrict__ y, const int K, const int N, const int64_t stride_col) {
+    const int sb   = blockIdx.x;
+    const int t    = blockIdx.y;
+    const int lane = threadIdx.x;
+    const int col  = t * 8 + lane / 4;
+    float v[8][8];
+    load_sb_col(v, x + (int64_t) col * stride_col + sb * QK, col < N, lane % 4);
+    quantize_sb_col(v, y + ((int64_t) t * (K / QK) + sb) * FSB, lane / 4, lane % 4);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -231,7 +241,7 @@ template <int NT> struct sb_math<qtype::iq4_xs, NT> {
             for (int t = 0; t < NT; ++t) {
                 int c[4] = { 0, 0, 0, 0 };
                 mma_k32(c, a, (int) bq[t][j].x, (int) bq[t][j].y);
-                const int e0 = (shw[t] >> (4 * j)) & 3, e1 = (shw[t] >> (4 * j + 2)) & 3;
+                const int e0 = (shw[t] >> (2 * j)) & 3, e1 = (shw[t] >> (16 + 2 * j)) & 3;
                 isum[t][0] += (ls0 << e0) * c[0];
                 isum[t][1] += (ls0 << e1) * c[1];
                 isum[t][2] += (ls1 << e0) * c[2];
@@ -275,7 +285,7 @@ template <qtype T, int NT> struct sb_math_k45 {
             for (int t = 0; t < NT; ++t) {
                 int c[4] = { 0, 0, 0, 0 };
                 mma_k32(c, a, (int) bq[t][j].x, (int) bq[t][j].y);
-                const int e0 = (shw[t] >> (4 * j)) & 3, e1 = (shw[t] >> (4 * j + 2)) & 3;
+                const int e0 = (shw[t] >> (2 * j)) & 3, e1 = (shw[t] >> (16 + 2 * j)) & 3;
                 isum[t][0] += (sc0 << e0) * c[0];
                 isum[t][1] += (sc0 << e1) * c[1];
                 isum[t][2] += (sc1 << e0) * c[2];
@@ -336,7 +346,7 @@ template <int NT> struct sb_math<qtype::q6_K, NT> {
                         int cb[4] = { 0, 0, 0, 0 };
                         mma_k16(ca, (int) x0, (int) x1, (int) bq[t][j].x);
                         mma_k16(cb, (int) y0, (int) y1, (int) bq[t][j].y);
-                        const int e0 = (shw[t] >> (4 * j)) & 3, e1 = (shw[t] >> (4 * j + 2)) & 3;
+                        const int e0 = (shw[t] >> (2 * j)) & 3, e1 = (shw[t] >> (16 + 2 * j)) & 3;
                         isum[t][0] += (sa0 * ca[0] + sb0 * cb[0]) << e0;
                         isum[t][1] += (sa0 * ca[1] + sb0 * cb[1]) << e1;
                         isum[t][2] += (sa1 * ca[2] + sb1 * cb[2]) << e0;

@@ -1461,6 +1461,7 @@ struct ggml_backend_cuda_context {
     const void * mmsq_x_end = nullptr;
     int64_t mmsq_x_ne[2] = {0, 0};
     int64_t mmsq_x_nb1 = 0;
+    bool mmsq_x_keep = false;  // set by a fusion that wrote the cached activations, consumed by ggml_cuda_mmsq_note_writes
     void * mmsq_xf = nullptr;
     int * mmsq_counters = nullptr; // split-K tile counters, one set per stream of this context
     bool mmsq_counters_init[GGML_CUDA_MAX_STREAMS] = {};

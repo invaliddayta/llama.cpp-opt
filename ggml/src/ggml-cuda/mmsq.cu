@@ -10,6 +10,7 @@ struct mmsq_env {
     int n_max = 16;
     int split_target = 4;
     bool reuse_x = true;
+    bool fuse_norm = true;
     bool enabled = true;
     mmsq_env() {
         if (const char * e = getenv("GGML_CUDA_MMSQ")) {
@@ -20,6 +21,9 @@ struct mmsq_env {
         }
         if (const char * e = getenv("GGML_CUDA_MMSQ_REUSE_X")) {
             reuse_x = atoi(e) != 0;
+        }
+        if (const char * e = getenv("GGML_CUDA_MMSQ_FUSE_NORM")) {
+            fuse_norm = atoi(e) != 0;
         }
         if (const char * e = getenv("GGML_CUDA_MMSQ_SPLIT")) {
             split_target = atoi(e);
@@ -33,6 +37,25 @@ struct mmsq_env {
 static const mmsq_env & get_env() {
     static mmsq_env env;
     return env;
+}
+
+// persistent activation buffer, sized for the largest supported shape so CUDA graphs keep a fixed pointer
+constexpr int MMSQ_MAX_NSB = 128;
+
+static uint8_t * get_xf(ggml_backend_cuda_context & ctx) {
+    if (ctx.mmsq_xf == nullptr) {
+        CUDA_CHECK(cudaMalloc(&ctx.mmsq_xf, (size_t) 2 * MMSQ_MAX_NSB * mmsq::FSB));
+    }
+    return (uint8_t *) ctx.mmsq_xf;
+}
+
+static void set_x_cache(ggml_backend_cuda_context & ctx, const ggml_tensor * src1) {
+    ctx.mmsq_x_valid = true;
+    ctx.mmsq_x_src = src1->data;
+    ctx.mmsq_x_end = (const char *) src1->data + ggml_nbytes(src1);
+    ctx.mmsq_x_ne[0] = src1->ne[0];
+    ctx.mmsq_x_ne[1] = src1->ne[1];
+    ctx.mmsq_x_nb1 = src1->nb[1];
 }
 
 static bool type_supported(ggml_type t) {
@@ -146,18 +169,12 @@ void ggml_cuda_mul_mat_sq(ggml_backend_cuda_context & ctx, const ggml_tensor * s
     cudaStream_t stream = ctx.stream();
     const int nsm = ggml_cuda_info().devices[ctx.device].nsm;
 
-    // persistent activation buffer, sized for the largest supported shape so CUDA graphs keep a fixed pointer
-    constexpr int MAX_NSB = 128;
-    const size_t xf_size = (size_t) 2 * MAX_NSB * mmsq::FSB;
     // the persistent buffer and reuse are restricted to stream 0; other streams use pool scratch
-    const bool persistent = nsb <= MAX_NSB && ctx.curr_stream_no == 0;
+    const bool persistent = nsb <= MMSQ_MAX_NSB && ctx.curr_stream_no == 0;
     ggml_cuda_pool_alloc<uint8_t> xf_pool(ctx.pool());
     uint8_t * xf = nullptr;
     if (persistent) {
-        if (ctx.mmsq_xf == nullptr) {
-            CUDA_CHECK(cudaMalloc(&ctx.mmsq_xf, xf_size));
-        }
-        xf = (uint8_t *) ctx.mmsq_xf;
+        xf = get_xf(ctx);
     } else {
         xf = xf_pool.alloc((size_t) ntiles * nsb * mmsq::FSB);
     }
@@ -167,12 +184,7 @@ void ggml_cuda_mul_mat_sq(ggml_backend_cuda_context & ctx, const ggml_tensor * s
         mmsq::quantize_x<<<dim3(nsb, ntiles), 32, 0, stream>>>((const float *) src1->data, xf, K, N, src1->nb[1] / sizeof(float));
     }
     if (persistent) {
-        ctx.mmsq_x_valid = true;
-        ctx.mmsq_x_src = src1->data;
-        ctx.mmsq_x_end = (const char *) src1->data + ggml_nbytes(src1);
-        ctx.mmsq_x_ne[0] = K;
-        ctx.mmsq_x_ne[1] = N;
-        ctx.mmsq_x_nb1 = src1->nb[1];
+        set_x_cache(ctx, src1);
     }
     int * counters = get_counters(ctx);
 
@@ -343,6 +355,11 @@ void ggml_cuda_mul_mat_f32_small(ggml_backend_cuda_context & ctx, const ggml_ten
 }
 
 void ggml_cuda_mmsq_note_writes(ggml_backend_cuda_context & ctx, const ggml_cgraph * cgraph, int first, int last) {
+    if (ctx.mmsq_x_keep) {
+        // the fused nodes produced the cached activations themselves
+        ctx.mmsq_x_keep = false;
+        return;
+    }
     if (!ctx.mmsq_x_valid) {
         return;
     }
@@ -364,4 +381,101 @@ void ggml_cuda_mmsq_note_writes(ggml_backend_cuda_context & ctx, const ggml_cgra
             return;
         }
     }
+}
+
+// ADD -> RMS_NORM -> MUL with the MMSQ activations of the result, one CTA per row. Same float operations as
+// k_bin_bcast (add) followed by rms_norm_f32<1024, true> and quantize_x, so the results are bit-identical.
+static constexpr int ARNQ_BLOCK = 1024;
+
+static __global__ void __launch_bounds__(ARNQ_BLOCK) add_rms_norm_mul_q(
+        const float * a, const float * b, float * sum, float * dst, const float * __restrict__ w,
+        const int ncols, const float eps, uint8_t * __restrict__ xf) {
+    __shared__ float s_sum[32];
+    const int tid = threadIdx.x;
+    const int row = blockIdx.x;
+    const int64_t off = (int64_t) row * ncols;
+
+    float tmp = 0.0f;
+    for (int col = tid; col < ncols; col += ARNQ_BLOCK) {
+        const float xi = a[off + col] + b[off + col];
+        sum[off + col] = xi;
+        tmp += xi * xi;
+    }
+    tmp = block_reduce<block_reduce_method::SUM, ARNQ_BLOCK>(tmp, s_sum);
+    const float mean  = tmp / ncols;
+    const float scale = rsqrtf(mean + eps);
+    for (int col = tid; col < ncols; col += ARNQ_BLOCK) {
+        dst[off + col] = scale * sum[off + col] * w[col];
+    }
+    __syncthreads();
+
+    // 4 lanes per super-block, whole warps
+    const int nsb = ncols / mmsq::QK;
+    const int sb  = tid / 4;
+    if ((tid / 32) * 8 >= nsb) {
+        return;
+    }
+    const bool active = sb < nsb;
+    float v[8][8];
+    mmsq::load_sb_col(v, dst + off + sb * mmsq::QK, active, tid % 4);
+    mmsq::quantize_sb_col(v, xf + ((int64_t) (row / 8) * nsb + sb) * mmsq::FSB, row % 8, tid % 4, active);
+}
+
+bool ggml_cuda_mmsq_add_rms_norm_mul(ggml_backend_cuda_context & ctx, const ggml_tensor * add, const ggml_tensor * norm, ggml_tensor * mul) {
+    const mmsq_env & env = get_env();
+    const int cc = ggml_cuda_info().devices[ctx.device].cc;
+    if (!env.enabled || !env.fuse_norm || !env.reuse_x || ctx.curr_stream_no != 0 ||
+            GGML_CUDA_CC_IS_AMD(cc) || GGML_CUDA_CC_IS_MTHREADS(cc) || cc < GGML_CUDA_CC_AMPERE) {
+        return false;
+    }
+    if (norm->src[0] != add || (mul->src[0] != norm && mul->src[1] != norm)) {
+        return false;
+    }
+    const ggml_tensor * w = mul->src[0] == norm ? mul->src[1] : mul->src[0];
+    const ggml_tensor * a = add->src[0];
+    const ggml_tensor * b = add->src[1];
+    const int64_t ncols = add->ne[0];
+    const int64_t N     = add->ne[1];
+    for (const ggml_tensor * t : { a, b, (const ggml_tensor *) add, norm, (const ggml_tensor *) mul }) {
+        if (t->type != GGML_TYPE_F32 || !ggml_is_contiguous(t) || !ggml_are_same_shape(t, add) || ((uintptr_t) t->data) % 16 != 0) {
+            return false;
+        }
+    }
+    if (w->type != GGML_TYPE_F32 || !ggml_is_contiguous(w) || w->ne[0] != ncols || ggml_nelements(w) != ncols) {
+        return false;
+    }
+    // each CTA reads an element of a/b before it writes that position, so outputs may be exactly a or b (in-place)
+    auto overlap = [](const ggml_tensor * x, const ggml_tensor * y) {
+        const char * xb = (const char *) x->data, * yb = (const char *) y->data;
+        return xb < yb + ggml_nbytes(y) && yb < xb + ggml_nbytes(x);
+    };
+    for (const ggml_tensor * out : { (const ggml_tensor *) add, (const ggml_tensor *) mul }) {
+        for (const ggml_tensor * in : { a, b }) {
+            if (overlap(out, in) && out->data != in->data) {
+                return false;
+            }
+        }
+        if (overlap(out, w)) {
+            return false;
+        }
+    }
+    if (overlap(add, mul)) {
+        return false;
+    }
+    const int nsb = (int) (ncols / mmsq::QK);
+    if (add->ne[2] != 1 || add->ne[3] != 1 || ncols % mmsq::QK != 0 || ncols < ARNQ_BLOCK || nsb > MMSQ_MAX_NSB ||
+            N < env.n_min || N > env.n_max || N > 16) {
+        return false;
+    }
+    float eps;
+    memcpy(&eps, norm->op_params, sizeof(float));
+
+    add_rms_norm_mul_q<<<N, ARNQ_BLOCK, 0, ctx.stream()>>>(
+        (const float *) a->data, (const float *) b->data, (float *) add->data, (float *) mul->data,
+        (const float *) w->data, (int) ncols, eps, get_xf(ctx));
+    CUDA_CHECK(cudaGetLastError());
+
+    set_x_cache(ctx, mul);
+    ctx.mmsq_x_keep = true;
+    return true;
 }
