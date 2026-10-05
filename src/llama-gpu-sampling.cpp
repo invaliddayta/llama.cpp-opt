@@ -3,6 +3,7 @@
 #include "llama-vocab.h"
 #include "ggml-cpp.h"
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <map>
@@ -11,9 +12,22 @@
 
 using namespace gpu_grammar_lab;
 
+static std::atomic<bool> gpu_sampling_active{true};
+
+bool llama_gpu_sampling_available() {
+    static const bool available = [] {
+        const char * value = std::getenv("LLAMA_GPU_SAMPLING");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    return available;
+}
+
+void llama_gpu_sampling_set_active(bool active) {
+    gpu_sampling_active = active;
+}
+
 bool llama_gpu_sampling_enabled() {
-    const char * value = std::getenv("LLAMA_GPU_SAMPLING");
-    return value && std::strcmp(value, "1") == 0;
+    return llama_gpu_sampling_available() && gpu_sampling_active;
 }
 
 static std::vector<int32_t> gpu_failure(const std::vector<int32_t> & input) {

@@ -622,6 +622,10 @@ struct llama_sampler * common_sampler_get(const struct common_sampler * gsmpl) {
     return gsmpl->chain;
 }
 
+bool common_sampler_backend_sampling(const struct common_sampler * gsmpl) {
+    return gsmpl && gsmpl->params.backend_sampling;
+}
+
 llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_context * ctx, int idx, bool grammar_first) {
     llama_synchronize(ctx);
 

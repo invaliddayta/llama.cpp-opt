@@ -1794,14 +1794,6 @@ private:
 
         // initialize samplers
         if (task.need_sampling()) {
-            try {
-                slot.smpl.reset(common_sampler_init(model_tgt, task.params.sampling));
-            } catch (std::exception & e) {
-                std::string err_msg = std::string("Failed to initialize samplers: ") + e.what();
-                send_error(task, err_msg, ERROR_TYPE_INVALID_REQUEST);
-                return false;
-            }
-
             const bool need_pre_sample_logits = task.params.sampling.n_probs > 0 && !task.params.post_sampling_probs;
 
             bool use_backend_sampling = task.params.sampling.backend_sampling;
@@ -1809,19 +1801,43 @@ private:
             // TODO: getting pre sampling logits is not yet supported with backend sampling
             use_backend_sampling &= !need_pre_sample_logits;
 
-            // TODO: tmp until backend sampling is fully implemented
-            try {
-                if (use_backend_sampling) {
-                    if (!llama_set_sampler(ctx_tgt, slot.id, common_sampler_get(slot.smpl.get())) && llama_gpu_sampling_enabled()) {
-                        throw std::runtime_error("Failed to attach backend sampler");
+            // GPU sampling serves a subset of requests; others use standard sampling
+            llama_gpu_sampling_set_active(llama_gpu_sampling_available());
+            while (true) {
+                try {
+                    slot.smpl.reset(common_sampler_init(model_tgt, task.params.sampling));
+                } catch (std::exception & e) {
+                    if (llama_gpu_sampling_enabled()) {
+                        SLT_WRN(slot, "GPU sampling not supported for this request (%s), using standard sampling\n", e.what());
+                        llama_gpu_sampling_set_active(false);
+                        continue;
                     }
-                } else {
-                    llama_set_sampler(ctx_tgt, slot.id, nullptr);
+                    std::string err_msg = std::string("Failed to initialize samplers: ") + e.what();
+                    send_error(task, err_msg, ERROR_TYPE_INVALID_REQUEST);
+                    return false;
                 }
-            } catch (const std::exception & e) {
-                llama_set_sampler(ctx_tgt, slot.id, nullptr);
-                send_error(task, e.what(), ERROR_TYPE_INVALID_REQUEST);
-                return false;
+
+                // TODO: tmp until backend sampling is fully implemented
+                try {
+                    if (use_backend_sampling && common_sampler_backend_sampling(slot.smpl.get())) {
+                        if (!llama_set_sampler(ctx_tgt, slot.id, common_sampler_get(slot.smpl.get())) && llama_gpu_sampling_enabled()) {
+                            throw std::runtime_error("Failed to attach backend sampler");
+                        }
+                    } else {
+                        llama_set_sampler(ctx_tgt, slot.id, nullptr);
+                    }
+                } catch (const std::exception & e) {
+                    llama_set_sampler(ctx_tgt, slot.id, nullptr);
+                    if (llama_gpu_sampling_enabled()) {
+                        SLT_WRN(slot, "GPU sampling not supported for this request (%s), using standard sampling\n", e.what());
+                        slot.smpl.reset();
+                        llama_gpu_sampling_set_active(false);
+                        continue;
+                    }
+                    send_error(task, e.what(), ERROR_TYPE_INVALID_REQUEST);
+                    return false;
+                }
+                break;
             }
 
             SLT_TRC(slot, "sampler chain: %s\n", common_sampler_print(slot.smpl.get()).c_str());
