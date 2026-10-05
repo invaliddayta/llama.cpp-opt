@@ -5,6 +5,9 @@
 #include "fattn-vec.cuh"
 #include "fattn.cuh"
 
+#include <cstdlib>
+#include <cstring>
+
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
 // one list per group of ncols1 queries: a column is selected if any query of the group can see it
 template <int ncols1, bool oob>
@@ -755,6 +758,62 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
     return f16_extra.end - (uintptr_t) dst->data;
 }
 
+static bool ggml_cuda_fattn_use_q4_mma(const int device, const ggml_tensor * dst) {
+#if defined(GGML_USE_HIP) || defined(GGML_USE_MUSA)
+    GGML_UNUSED_VARS(device, dst);
+    return false;
+#else
+    static const bool enabled = [] {
+        const char * value = std::getenv("GGML_CUDA_FATTN_Q4_MMA");
+        if (!value || std::strcmp(value, "0") == 0) {
+            return false;
+        }
+        if (std::strcmp(value, "1") != 0) {
+            GGML_ABORT("GGML_CUDA_FATTN_Q4_MMA must be 0 or 1");
+        }
+        return true;
+    }();
+    if (!enabled || ggml_cuda_info().devices[device].cc != 860 || ggml_cuda_highest_compiled_arch(860) != 860) {
+        return false;
+    }
+    const ggml_tensor * Q = dst->src[0];
+    const ggml_tensor * K = dst->src[1];
+    const ggml_tensor * V = dst->src[2];
+    const ggml_tensor * mask = dst->src[3];
+    if (!Q || !K || !V || !mask || dst->src[4] || Q->type != GGML_TYPE_F32 ||
+            K->type != GGML_TYPE_Q4_0 || V->type != GGML_TYPE_Q4_0 || mask->type != GGML_TYPE_F16 ||
+            Q->ne[0] != 256 || Q->ne[1] != 8 || Q->ne[2] != 24 || Q->ne[3] != 1 ||
+            K->ne[0] != 256 || K->ne[2] != 4 || K->ne[3] != 1 ||
+            K->ne[1] < 256 || K->ne[1] > 196608 || K->ne[1] % FATTN_KQ_STRIDE != 0 ||
+            !ggml_are_same_shape(K, V) || mask->ne[0] != K->ne[1] || mask->ne[1] != 8 || mask->ne[2] != 1 || mask->ne[3] != 1) {
+        return false;
+    }
+    if (Q->nb[0] != sizeof(float) || Q->nb[1] != 256 * 24 * sizeof(float) || Q->nb[2] != 256 * sizeof(float) ||
+            K->nb[0] != sizeof(block_q4_0) || V->nb[0] != sizeof(block_q4_0) ||
+            K->nb[1] != ggml_row_size(GGML_TYPE_Q4_0, 256) * 4 || V->nb[1] != K->nb[1] ||
+            K->nb[2] != ggml_row_size(GGML_TYPE_Q4_0, 256) || V->nb[2] != K->nb[2] ||
+            !ggml_is_contiguously_allocated(K) || !ggml_is_contiguously_allocated(V)) {
+        return false;
+    }
+    for (const ggml_tensor * tensor : {Q, K, V, mask}) {
+        if (reinterpret_cast<uintptr_t>(tensor->data) % 16 != 0) {
+            return false;
+        }
+        if (tensor == Q || tensor == mask) {
+            for (size_t i = 1; i < GGML_MAX_DIMS; ++i) {
+                if (tensor->nb[i] % 16 != 0) {
+                    return false;
+                }
+            }
+        }
+    }
+    float max_bias, logit_softcap;
+    memcpy(&max_bias, (const float *) dst->op_params + 1, sizeof(float));
+    memcpy(&logit_softcap, (const float *) dst->op_params + 2, sizeof(float));
+    return max_bias == 0.0f && logit_softcap == 0.0f && ggml_get_op_params_i32(dst, 4) == 0;
+#endif
+}
+
 void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     ggml_cuda_set_device(ctx.device);
     switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
@@ -767,7 +826,18 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
             ggml_cuda_flash_attn_ext_vec(ctx, dst);
             break;
         case BEST_FATTN_KERNEL_MMA_F16:
-            ggml_cuda_flash_attn_ext_mma_f16(ctx, dst);
+            if (ggml_cuda_fattn_use_q4_mma(ctx.device, dst)) {
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+                static const bool reported = [] {
+                    fprintf(stderr, "ggml_cuda_flash_attn_ext: fused q4_0 MMA enabled for sm86 256/8/24/4\n");
+                    return true;
+                }();
+                GGML_UNUSED(reported);
+                ggml_cuda_flash_attn_ext_mma_f16_case_impl<256, 256, 8, 8, true>(ctx, dst);
+#endif
+            } else {
+                ggml_cuda_flash_attn_ext_mma_f16(ctx, dst);
+            }
             break;
     }
 }
