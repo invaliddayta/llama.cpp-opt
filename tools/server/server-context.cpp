@@ -16,6 +16,7 @@
 #include "speculative.h"
 #include "mtmd.h"
 #include "mtmd-helper.h"
+#include "server-sleep-cache.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -932,6 +933,33 @@ private:
         mctx = nullptr;
     }
 
+    void sleep_cache(bool writing) {
+        const char * directory = std::getenv("LLAMA_SLEEP_CACHE_DIR");
+        if (!directory || !*directory) {
+            return;
+        }
+        for (auto & slot : slots) {
+            const std::string path = (std::filesystem::path(directory) / ("slot-" + std::to_string(slot.id) + ".bin")).string();
+            const int64_t start = ggml_time_us();
+            try {
+                const size_t bytes = writing ? server_sleep_cache::save(path, slot) : server_sleep_cache::restore(path, slot);
+                if (bytes) {
+                    SRV_INF("sleep cache %s: slot %d, %zu tokens, %zu checkpoints, %.1f MiB, %.1f ms\n",
+                            writing ? "saved" : "restored", slot.id, slot.prompt.tokens.size(), slot.prompt.checkpoints.size(),
+                            bytes / (1024.0 * 1024.0), (ggml_time_us() - start) / 1000.0);
+                }
+            } catch (const std::exception & error) {
+                SRV_WRN("sleep cache %s failed for slot %d: %s; continuing without snapshot\n",
+                        writing ? "save" : "restore", slot.id, error.what());
+                if (!writing) {
+                    slot.prompt_clear();
+                    std::error_code ignored;
+                    std::filesystem::remove(path, ignored);
+                }
+            }
+        }
+    }
+
     void handle_sleeping_state(bool new_state) {
         GGML_ASSERT(sleeping != new_state);
         if (new_state) {
@@ -940,6 +968,9 @@ private:
                 // note: for sleeping == false, event is emitted by load_model()
             }
             SRV_INF("%s", "server is entering sleeping state\n");
+            sleep_cache(true);
+            slots.clear();
+            prompt_cache.reset();
             destroy();
         } else {
             SRV_INF("%s", "server is exiting sleeping state\n");
@@ -1366,6 +1397,8 @@ private:
 
         // propagate new defaults back to caller
         params = params_base;
+
+        sleep_cache(false);
 
         if (!is_resume) {
             return init();

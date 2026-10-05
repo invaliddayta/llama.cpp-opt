@@ -1455,6 +1455,16 @@ struct ggml_backend_cuda_context {
 
     int curr_stream_no = 0;
 
+    // mmsq: quantized activations reused by later mul_mat nodes with the same src1, until a node writes over src1
+    bool mmsq_x_valid = false;
+    const void * mmsq_x_src = nullptr;
+    const void * mmsq_x_end = nullptr;
+    int64_t mmsq_x_ne[2] = {0, 0};
+    int64_t mmsq_x_nb1 = 0;
+    void * mmsq_xf = nullptr;
+    int * mmsq_counters = nullptr; // split-K tile counters, one set per stream of this context
+    bool mmsq_counters_init[GGML_CUDA_MAX_STREAMS] = {};
+
 #ifdef USE_CUDA_GRAPH
     // Map from first_node_ptr to cuda_graph - allows multiple graphs per context
     // when the computation is split across CPU/GPU (e.g., with --n-cpu-moe)
