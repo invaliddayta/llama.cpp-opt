@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="#whats-different">What's different</a> &middot; <a href="#build">Build</a> &middot; <a href="#switches">Switches</a> &middot; <a href="https://github.com/invaliddayta/llm-opt">Benchmarks and notes</a> &middot; <a href="https://github.com/ggml-org/llama.cpp">Upstream llama.cpp</a>
+  <a href="#whats-different">What's different</a> &middot; <a href="#tested-with">Tested with</a> &middot; <a href="#build">Build</a> &middot; <a href="#switches">Switches</a> &middot; <a href="https://github.com/invaliddayta/llm-opt">Benchmarks and notes</a> &middot; <a href="https://github.com/ggml-org/llama.cpp">Upstream llama.cpp</a>
 </p>
 
 This is [llama.cpp](https://github.com/ggml-org/llama.cpp) at upstream `8df332de1` (tag
@@ -41,6 +41,24 @@ Benchmarks, kernel labs and design notes are in
 
 GPU sampling falls back to standard sampling for any request it can't serve (penalties,
 logprobs, reasoning budget, regex triggers), so no request is rejected.
+
+## Tested with
+
+| | |
+| --- | --- |
+| Target | `Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-IQ4_XS.gguf` ([HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF](https://huggingface.co/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF) @ `993a5971`) |
+| Draft | stock `Qwen3.8-27B-DFlash2-Q4_K_M.gguf` ([z-lab/Qwen3.8-27B-DFlash2-GGUF](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2-GGUF) @ `2d9571f8`), 7 drafted + 1 = 8 tokens verified per step |
+| KV cache | target q4_0 for K and V (3.6x smaller than f16, 1.7 GiB at 98K), draft f16 |
+| Context | 98,304 tokens |
+| GPU | RTX 3090 24 GB (sm_86) over USB4 |
+
+| ms per verify step | explanation | python100 (tools) | story |
+| --- | --- | --- | --- |
+| upstream `8df332de1` | 53.3 | 55.1 | 53.8 |
+| **llama.cpp-opt** | **32.7** | **33.4** | **33.3** |
+
+Same files, flags and sampling, run back to back. Checksums, the full method and more tables:
+[llm-opt](https://github.com/invaliddayta/llm-opt#results).
 
 ## Build
 
