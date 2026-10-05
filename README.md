@@ -1,3 +1,14 @@
+> [!NOTE]
+> **llama.cpp-opt** is a fork of llama.cpp at upstream `8df332de1` (tag `upstream-base`), branch
+> `opt/main`. It speeds up speculative decoding of Qwen3.8-27B (IQ4_XS) with a DFlash2 draft on
+> one RTX 3090 (sm_86): small-batch quantized GEMM on int8 tensor cores (MMSQ) with fused
+> norm/quantization, a fused q4_0 KV loader for MMA flash attention, GPU sampling with tool
+> grammars, GPU-resident DFlash features, a sleep cache, and a fix for a `flash_attn_ext_vec`
+> race. Benchmarks, measurements and design notes:
+> [invaliddayta/llm-opt](https://github.com/invaliddayta/llm-opt). Opt-ins:
+> `GGML_CUDA_FATTN_Q4_MMA=1`, `LLAMA_GPU_SAMPLING=1`, `LLAMA_DFLASH_GPU_FEATURES=1`.
+> Not affiliated with ggml-org; the rest of this README is upstream's.
+
 # llama.cpp
 
 ![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
