@@ -80,12 +80,18 @@ void launch(const uint8_t * W, int64_t row_bytes, const uint8_t * XF, int M, int
     const int sbps = ((nsb + splits - 1) / splits + KW - 1) / KW * KW;
     splits = (nsb + sbps - 1) / sbps;
 
+    // MINB 8 fits 8 CTAs/SM with fewer registers. Use the faster 6 CTAs/SM code when the grid fits one such wave
+    // or leaves only a small tail at 8 CTAs/SM. Same arithmetic, so results do not change.
+    const int nctas = ctas_m * splits;
+    const bool rich = MINB == 8 && (nctas <= 6 * nsm || (nctas > 8 * nsm && nctas % (8 * nsm) < 2 * nsm));
+    auto kernel = rich ? mmsq::mul_mat<T, NT, KW, 4, 2> : mmsq::mul_mat<T, NT, KW, MINB, 2>;
+
     if (splits == 1) {
-        mmsq::mul_mat<T, NT, KW, MINB, 2><<<dim3(ctas_m, 1), KW * 32, smem, stream>>>(W, row_bytes, XF, dst, M, K, N, stride_dst_col, nullptr, nullptr, sbps);
+        kernel<<<dim3(ctas_m, 1), KW * 32, smem, stream>>>(W, row_bytes, XF, dst, M, K, N, stride_dst_col, nullptr, nullptr, sbps);
         return;
     }
     ggml_cuda_pool_alloc<float> part(pool, (size_t) splits * N * M);
-    mmsq::mul_mat<T, NT, KW, MINB, 2><<<dim3(ctas_m, splits), KW * 32, smem, stream>>>(W, row_bytes, XF, dst, M, K, N, stride_dst_col, part.get(), counters, sbps);
+    kernel<<<dim3(ctas_m, splits), KW * 32, smem, stream>>>(W, row_bytes, XF, dst, M, K, N, stride_dst_col, part.get(), counters, sbps);
 }
 
 template <mmsq::qtype T>
