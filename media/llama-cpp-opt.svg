@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="390" viewBox="0 0 1200 390" role="img" aria-labelledby="title desc">
+  <title id="title">llama.cpp-opt</title>
+  <desc id="desc">llama.cpp-opt: a llama.cpp fork tuned for speculative decoding on the RTX 3090. Small-batch int8 tensor-core GEMM, fused q4 KV attention, GPU tool grammar, GPU-resident DFlash features, sleep cache.</desc>
+  <rect width="1200" height="390" fill="#090c12"/>
+  <rect x="24.5" y="24.5" width="1151" height="341" fill="#101318" stroke="#45484e"/>
+  <path d="M25 59.5h1150M25 326.5h1150" stroke="#45484e"/>
+  <rect x="25" y="25" width="1150" height="34" fill="#1d1f23"/>
+  <path d="m40 36 6 6-6 6m12 0h7" fill="none" stroke="#76b900" stroke-width="2"/>
+  <g font-family="'DejaVu Sans Mono',Consolas,monospace">
+    <text x="72" y="47" fill="#c9cbd0" font-size="13">llama.cpp-opt</text>
+    <text x="1146" y="47" fill="#96999f" font-size="12" text-anchor="end">FORK OF LLAMA.CPP @ 8DF332DE1</text>
+    <text x="70" y="150" fill="#dededb" font-size="76" font-weight="700" letter-spacing="-5">llama.cpp</text>
+    <text x="438" y="150" fill="#3b5a00" font-size="76" font-weight="700" font-style="italic" letter-spacing="-5">-opt</text>
+    <text x="435" y="147" fill="#76b900" font-size="76" font-weight="700" font-style="italic" letter-spacing="-5">-opt</text>
+    <text x="73" y="195" fill="#b3b7bf" font-size="20">llama.cpp, tuned for speculative decode on sm_86.</text>
+
+    <g font-size="14">
+      <rect x="73.5" y="225.5" width="300" height="30" fill="#16191e" stroke="#45484e"/>
+      <text x="88" y="245" fill="#76b900">MMSQ</text><text x="138" y="245" fill="#c9cbd0">int8 small-batch GEMM</text>
+      <rect x="389.5" y="225.5" width="300" height="30" fill="#16191e" stroke="#45484e"/>
+      <text x="404" y="245" fill="#76b900">FA</text><text x="436" y="245" fill="#c9cbd0">fused q4_0 KV loader</text>
+      <rect x="705.5" y="225.5" width="300" height="30" fill="#16191e" stroke="#45484e"/>
+      <text x="720" y="245" fill="#76b900">GRAMMAR</text><text x="796" y="245" fill="#c9cbd0">tool DFA on the GPU</text>
+      <rect x="73.5" y="267.5" width="300" height="30" fill="#16191e" stroke="#45484e"/>
+      <text x="88" y="287" fill="#76b900">DFLASH</text><text x="156" y="287" fill="#c9cbd0">features stay on GPU</text>
+      <rect x="389.5" y="267.5" width="300" height="30" fill="#16191e" stroke="#45484e"/>
+      <text x="404" y="287" fill="#76b900">FUSED</text><text x="462" y="287" fill="#c9cbd0">norm + quantization</text>
+      <rect x="705.5" y="267.5" width="300" height="30" fill="#16191e" stroke="#45484e"/>
+      <text x="720" y="287" fill="#76b900">SLEEP</text><text x="778" y="287" fill="#c9cbd0">cache across idle</text>
+    </g>
+
+    <text x="42" y="350" fill="#96999f" font-size="12">54 MS -> 33 MS PER VERIFY STEP.</text>
+    <text x="1157" y="350" fill="#96999f" font-size="12" text-anchor="end">MIT, LIKE UPSTREAM</text>
+  </g>
+</svg>

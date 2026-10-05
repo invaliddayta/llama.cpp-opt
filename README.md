@@ -1,137 +1,95 @@
-> [!NOTE]
-> **llama.cpp-opt** is a fork of llama.cpp at upstream `8df332de1` (tag `upstream-base`), branch
-> `opt/main`. It speeds up speculative decoding of Qwen3.8-27B (IQ4_XS) with a DFlash2 draft on
-> one RTX 3090 (sm_86): small-batch quantized GEMM on int8 tensor cores (MMSQ) with fused
-> norm/quantization, a fused q4_0 KV loader for MMA flash attention, GPU sampling with tool
-> grammars, GPU-resident DFlash features, a sleep cache, and a fix for a `flash_attn_ext_vec`
-> race. Benchmarks, measurements and design notes:
-> [invaliddayta/llm-opt](https://github.com/invaliddayta/llm-opt). Opt-ins:
-> `GGML_CUDA_FATTN_Q4_MMA=1`, `LLAMA_GPU_SAMPLING=1`, `LLAMA_DFLASH_GPU_FEATURES=1`.
-> Not affiliated with ggml-org; the rest of this README is upstream's.
+<p align="center">
+  <img src="media/llama-cpp-opt.svg" alt="llama.cpp-opt: llama.cpp, tuned for speculative decode on sm_86" width="1200">
+</p>
 
-# llama.cpp
+<p align="center">
+  <strong>A llama.cpp fork that verifies 8 draft tokens in 33 ms instead of 54.</strong><br>
+  Qwen3.8-27B + DFlash2 speculative decoding on one RTX 3090, same output as before every kernel change.
+</p>
 
-![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
+<p align="center">
+  <code>BASED ON 8DF332DE1</code> &nbsp; <code>CUDA / SM_86</code> &nbsp; <code>OPT-IN FEATURES</code> &nbsp; <a href="LICENSE">MIT</a>
+</p>
 
-<div align="center">
+<p align="center">
+  <a href="#whats-different">What's different</a> &middot; <a href="#build">Build</a> &middot; <a href="#switches">Switches</a> &middot; <a href="https://github.com/invaliddayta/llm-opt">Benchmarks and notes</a> &middot; <a href="https://github.com/ggml-org/llama.cpp">Upstream llama.cpp</a>
+</p>
 
-<b>LLM inference in C/C++</b>
+This is [llama.cpp](https://github.com/ggml-org/llama.cpp) at upstream `8df332de1` (tag
+`upstream-base`) plus a short, linear series of commits on `opt/main`. They target one setup:
+a 27B hybrid Gated-DeltaNet/attention model (Qwen3.8-27B, IQ4_XS) drafting with DFlash2 on an
+RTX 3090, verifying 8 tokens per step at long context. On that setup a verify step drops from
+~54 ms to ~33 ms.
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Release](https://img.shields.io/github/v/release/ggml-org/llama.cpp?filter=v*&color=brightgreen)](https://github.com/ggml-org/llama.cpp/releases?q=tag:v0)
-[![Nightly](https://img.shields.io/github/v/release/ggml-org/llama.cpp?label=nightly&filter=b*&color=orange)](https://github.com/ggml-org/llama.cpp/releases?q=b)
-[![Server](https://img.shields.io/github/actions/workflow/status/ggml-org/llama.cpp/server.yml?label=Server)](https://github.com/ggml-org/llama.cpp/actions/workflows/server.yml)
-[![Docker](https://img.shields.io/github/actions/workflow/status/ggml-org/llama.cpp/docker.yml?label=Docker)](https://github.com/ggml-org/llama.cpp/actions/workflows/docker.yml)
-[![Winget](https://img.shields.io/github/actions/workflow/status/ggml-org/llama.cpp/winget.yml?label=Winget)](https://github.com/ggml-org/llama.cpp/actions/workflows/winget.yml)
+Everything else is upstream llama.cpp. Its documentation lives in [docs/](docs/), with
+[build instructions](docs/build.md) and the [server README](tools/server/README.md).
+Benchmarks, kernel labs and design notes are in
+**[llm-opt](https://github.com/invaliddayta/llm-opt)**.
 
-[ggml](https://github.com/ggml-org/ggml) / [ops](https://github.com/ggml-org/llama.cpp/blob/master/docs/ops.md) / [maintainer PRs](https://github.com/ggml-org/llama.cpp/issues?q=is%3Apr%20is%3Aopen%20draft%3AFalse%20(author%3Argerganov%20OR%20author%3AKitaitiMakoto%20OR%20author%3Adanbev%20OR%20author%3Aaldehir%20OR%20author%3Amax-krasnyansky%20OR%20author%3ACISC%20OR%20author%3Aggerganov%20OR%20author%3Aam17an%20OR%20author%3Ajhen0409%20OR%20author%3Abartowski1182%20OR%20author%3Anikwen%20OR%20author%3Ahipudding%20OR%20author%3Aravi9%20OR%20author%3AServeurpersoCom%20OR%20author%3Apwilkin%20OR%20author%3Areeselevine%20OR%20author%3Angxson%20OR%20author%3Ajeffbolznv%20OR%20author%3Amarty1885%20OR%20author%3A0cc4m%20OR%20author%3ATitaniumtown%20OR%20author%3Aangt%20OR%20author%3AIMbackK%20OR%20author%3Aarthw%20OR%20author%3AJohannesGaessler%20OR%20author%3AORippler%20OR%20author%3Aruixiang63%20OR%20author%3Axctan%20OR%20author%3Aallozaur%20OR%20author%3Ayomaytk%20OR%20author%3Aaendk%20OR%20author%3Awine99%20OR%20author%3Agaugarg-nv%20OR%20author%3Ataronaeo%20OR%20author%3Aforforever73%20OR%20author%3Alhez%20OR%20author%3Anetrunnereve%20OR%20author%3Afairydreaming)%20sort%3Aupdated-desc) / [dev stats](https://github.com/ggml-org/llama.cpp-dev) / [lib llama API](https://github.com/ggml-org/llama.cpp/issues/9289) / [llama-server REST API](https://github.com/ggml-org/llama.cpp/issues/9291)
+## What's different
 
-</div>
+| | Change | Effect |
+| --- | --- | --- |
+| **MMSQ** | Small-batch (N <= 16) quantized GEMM on int8 tensor cores for IQ4_XS, Q4_K, Q5_K, Q6_K: split-K, activation reuse, occupancy-aware dispatch | Weights stream at 750-830 GB/s of ~840; most of the speedup |
+| **Fused norm** | Residual add + RMS norm + weight + MMSQ activation quantization as one kernel | 127 fewer kernels per step, bit-exact |
+| **Q4 MMA attention** | q4_0 K/V decoded straight into the 8-query MMA flash-attention tiles | 95.8 -> 109.7 tok/s at 91K context |
+| **GPU grammar** | Tool-call grammars compiled to a DFA, masked and sampled on the GPU (Philox RNG) | No logits copy to the host on tool requests |
+| **DFlash features** | Target features for the DFlash2 draft stay in a CUDA staging tensor | No host round trip per step |
+| **Small kernels** | Small top-k, conv-state snapshot fusion, small F32 matmul | Fewer, cheaper launches |
+| **Sleep cache** | Server snapshots KV and recurrent state to disk on idle unload and restores it on wake | Long contexts survive idle sleep |
+| **Race fix** | Write-after-read race on `KQ` in `flash_attn_ext_vec` (also in upstream) | racecheck 2.2M hazards -> 0 |
 
-## Quick start
+GPU sampling falls back to standard sampling for any request it can't serve (penalties,
+logprobs, reasoning budget, regex triggers), so no request is rejected.
 
-A few options to get `llama.cpp` installed on your machine:
-
-- Visit https://llama.app and follow the instructions
-- Run with Docker - see our [Docker documentation](docs/docker.md)
-- Download pre-built binaries from the [releases page](https://github.com/ggml-org/llama.cpp/releases)
-- Build from source by cloning this repository - check out [our build guide](docs/build.md)
-
-Once installed:
+## Build
 
 ```sh
-# Download and run a model directly from Hugging Face
-llama cli -hf ggml-org/Qwen3.5-0.8B-GGUF
-
-# Launch OpenAI-compatible API server
-llama serve -hf ggml-org/Qwen3.5-0.8B-GGUF
+git clone -b opt/main https://github.com/invaliddayta/llama.cpp-opt && cd llama.cpp-opt
+cmake -S . -B build -G Ninja -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=86 -DCMAKE_BUILD_TYPE=Release \
+      -DGGML_CUDA_FA_QUANTS="q4_0-q4_0;q8_0-q8_0;f16-f16;bf16-bf16"
+ninja -C build llama-server
 ```
 
-<table align="center">
-    <tr>
-        <td align="center" width=50%>
-            <img width="1310" height="888" alt="VLM session with `llama cli`" src="https://github.com/user-attachments/assets/88726b48-1713-48aa-a525-95a02e78afc4" />
-            <i>VLM session with <b>llama cli</b></i>
-        </td>
-        <td align="center">
-            <img width="1392" height="958" alt="Built-in web UI against `llama serve` running Qwen 3.6" src="https://github.com/user-attachments/assets/b402f972-2e32-4def-8771-8d849f08cf2e" />
-            <i>Built-in web UI against <b>llama serve</b></i>
-        </td>
-    </tr>
-<table>
+Example server for the target setup:
 
-## Description
+```sh
+GGML_CUDA_FATTN_Q4_MMA=1 LLAMA_GPU_SAMPLING=1 LLAMA_DFLASH_GPU_FEATURES=1 \
+build/bin/llama-server -m target-IQ4_XS.gguf --ctx-size 98304 --gpu-layers 999 --flash-attn on \
+  --cache-type-k q4_0 --cache-type-v q4_0 \
+  --spec-draft-model DFlash2-Q4_K_M.gguf --spec-type draft-dflash --spec-draft-ngl 999 \
+  --spec-draft-n-max 7 --spec-draft-p-min 0 --backend-sampling --jinja
+```
 
-The main goal of `llama.cpp` is to enable LLM (and VLM) inference with minimal setup and state-of-the-art performance on
-a wide range of hardware - locally and in the cloud.
+The full flag set used in benchmarks is in
+[llm-opt `bench/serve_test.sh`](https://github.com/invaliddayta/llm-opt/blob/main/bench/serve_test.sh).
 
-- Plain C/C++ implementation without any dependencies
-- Apple silicon is a first-class citizen - optimized via ARM NEON, Accelerate and Metal frameworks
-- AVX, AVX2, AVX512 and AMX support for x86 architectures
-- RVV, ZVFH, ZFH, ZICBOP and ZIHINTPAUSE support for RISC-V architectures
-- 1.5-bit, 2-bit, 3-bit, 4-bit, 5-bit, 6-bit, and 8-bit integer quantization for faster inference and reduced memory use
-- Custom CUDA kernels for running LLMs on NVIDIA GPUs (support for AMD GPUs via HIP and Moore Threads GPUs via MUSA)
-- Vulkan and SYCL backend support
-- CPU+GPU hybrid inference to partially accelerate models larger than the total VRAM capacity
+## Switches
 
-The `llama.cpp` project is build on top of the [ggml](https://github.com/ggml-org/ggml) library.
+| Env var | Default | Effect |
+| --- | --- | --- |
+| `GGML_CUDA_FATTN_Q4_MMA=1` | off | Fused q4_0 KV loader in MMA flash attention (sm86, head 256, 24/4 heads, 8 queries) |
+| `LLAMA_GPU_SAMPLING=1` | off | Sampling and tool grammar on the GPU, per-request fallback |
+| `LLAMA_DFLASH_GPU_FEATURES=1` | off | DFlash target features stay on the GPU |
+| `GGML_CUDA_MMSQ=0` | on | Turns MMSQ (and its fusions) off |
+| `GGML_CUDA_MMSQ_FUSE_NORM=0` | on | Turns only the fused norm/quantization off |
+| `LLAMA_SLEEP_CACHE_DIR` | unset | Sleep cache: with `--sleep-idle-seconds N`, slots are written here on sleep and restored on wake |
+| `LLAMA_SLEEP_CACHE_KEY` | required with DIR | Cache identity; change it whenever model, build or settings change |
+| `LLAMA_SLEEP_CACHE_MAX_MIB` | 16384 | Size limit of the snapshot |
 
-## Supported backends
+MMSQ needs Ampere or newer. Shapes, types and batch sizes outside its range use upstream's
+kernels, and every opt-in leaves the upstream path untouched when off.
 
-| Backend | Target devices |
-| --- | --- |
-| [BLAS](docs/build.md#blas-build) | All |
-| [BLIS](docs/backend/BLIS.md) | All |
-| [CANN](docs/build.md#cann) | Ascend NPU |
-| [CUDA](docs/build.md#cuda) | Nvidia GPU |
-| [HIP](docs/build.md#hip) | AMD GPU |
-| [Hexagon](docs/backend/snapdragon/README.md) | Snapdragon |
-| [IBM zDNN](docs/backend/zDNN.md) | IBM Z & LinuxONE |
-| [MUSA](docs/build.md#musa) | Moore Threads GPU |
-| [Metal](docs/build.md#metal-build) | Apple Silicon |
-| [OpenCL](docs/backend/OPENCL.md) | Adreno GPU |
-| [OpenVINO [In Progress]](docs/backend/OPENVINO.md) | Intel CPUs, GPUs, and NPUs |
-| [RPC](https://github.com/ggml-org/llama.cpp/tree/master/tools/rpc) | All |
-| [SYCL](docs/backend/SYCL.md) | Intel GPU |
-| [VirtGPU](docs/backend/VirtGPU.md) | VirtGPU APIR |
-| [Vulkan](docs/build.md#vulkan) | GPU |
-| [WebGPU](docs/build.md#webgpu) | All |
-| [ZenDNN](docs/build.md#zendnn) | AMD CPU |
+## Staying close to upstream
 
-## Documentation
+`opt/main` is a linear series on top of `upstream-base`. The whole difference as one patch:
 
-#### Tools
+```sh
+git diff upstream-base opt/main -- . ':!examples' ':!README.md' ':!media/llama-cpp-opt.svg'
+```
 
-- [cli](tools/cli/README.md)
-- [completion](tools/completion/README.md)
-- [server](tools/server/README.md)
-- [GBNF grammars](grammars/README.md)
+`examples/dflash-dump` holds fork-only tools for draft-model training and is left out.
 
-#### Development
+## License
 
-- [How to build](docs/build.md)
-- [Running on Docker](docs/docker.md)
-- [Build on Android](docs/android.md)
-- [Multi-GPU usage](docs/multi-gpu.md)
-- [Performance troubleshooting](docs/development/token_generation_performance_tips.md)
-- [GGML tips & tricks](https://github.com/ggml-org/llama.cpp/wiki/GGML-Tips-&-Tricks)
-- [XCFramework](docs/xcframework.md)
-- [Completions](docs/completions.md)
-- [Models](docs/models.md)
-- [Release process](docs/release.md)
-
-## Contributing
-
-- Contributors can open PRs
-- Collaborators will be invited based on contributions
-- Maintainers can push to branches in the `llama.cpp` repo and merge PRs into the `master` branch
-- Any help with managing issues, PRs and projects is very appreciated!
-- Read the [CONTRIBUTING.md](CONTRIBUTING.md) for more information
-
-## Acknowledgements
-
-- [yhirose/cpp-httplib](https://github.com/yhirose/cpp-httplib) - Single-header HTTP server, used by `llama-server` - MIT license
-- [nothings/stb](https://github.com/nothings/stb) - Single-header image format decoder, used by multimodal subsystem - Public domain
-- [nlohmann/json](https://github.com/nlohmann/json) - Single-header JSON library, used by various tools/examples - MIT License
-- [mackron/miniaudio](https://github.com/mackron/miniaudio) - Single-header audio format decoder, used by multimodal subsystem - Public domain
-- [sheredom/subprocess.h](https://github.com/sheredom/subprocess.h) - Single-header process launching solution for C and C++ - Public domain
+MIT, like upstream llama.cpp ([LICENSE](LICENSE)). Not affiliated with ggml-org.
