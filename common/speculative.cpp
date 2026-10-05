@@ -1031,7 +1031,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         // embd batches on an M-RoPE draft carry 4 position rows per token
         is_mrope = llama_model_rope_type(model_dft) == LLAMA_ROPE_TYPE_MROPE;
 
-        const bool gpu_sampling = llama_gpu_sampling_enabled();
+        const bool gpu_sampling = llama_gpu_sampling_available();
         if (gpu_sampling && (!is_dflash2 || n_seq != 1 || this->params.p_min != 0.0f)) {
             throw std::runtime_error("GPU sampling requires single-sequence DFlash2 with p_min=0");
         }
@@ -1082,6 +1082,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
             GGML_ASSERT(n_seq == 1 && this->params.p_min == 0.0f);
             dflash2_gpu_select = llama_set_dflash2_gpu_select(ctx_dft, this->params.n_max + 1);
             GGML_ASSERT(dflash2_gpu_select && "DFlash2 GPU selector unavailable; refusing CPU fallback");
+            LOG_INF("%s: DFlash2 GPU selector enabled\n", __func__);
         }
     }
 
