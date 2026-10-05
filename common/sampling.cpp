@@ -4,6 +4,7 @@
 #include "fit.h"
 #include "log.h"
 #include "reasoning-budget.h"
+#include "../src/llama-gpu-sampling.h"
 
 #include "ggml.h"
 
@@ -199,6 +200,13 @@ struct common_sampler * common_sampler_init(
         throw std::invalid_argument("penalty_present must be finite");
     }
     const llama_vocab * vocab = llama_model_get_vocab(model);
+    const bool gpu_sampling = llama_gpu_sampling_enabled();
+    if (gpu_sampling && (!params.backend_sampling || params.n_probs != 0 || params.reasoning_budget_tokens >= 0 || params.reasoning_control)) {
+        throw std::runtime_error("GPU sampling requires backend sampling, no logprobs, and unlimited reasoning budget");
+    }
+    if (gpu_sampling && (params.penalty_repeat != 1.0f || params.penalty_freq != 0.0f || params.penalty_present != 0.0f)) {
+        throw std::runtime_error("GPU sampling: active token penalties require device-side history and are not supported");
+    }
     llama_sampler_chain_params lparams = llama_sampler_chain_default_params();
 
     lparams.no_perf = params.no_perf;
@@ -210,13 +218,13 @@ struct common_sampler * common_sampler_init(
     std::vector<llama_sampler *> samplers;
 
     const std::string & grammar_str = common_grammar_value(params.grammar);
-    if (grammar_str.compare(0, 11, "%llguidance") == 0) {
+    if (!gpu_sampling && grammar_str.compare(0, 11, "%llguidance") == 0) {
 #ifdef LLAMA_USE_LLGUIDANCE
         grmr = llama_sampler_init_llg(vocab, "lark", grammar_str.c_str());
 #else
         throw std::runtime_error("failed to parse grammar: llguidance is not enabled");
 #endif // LLAMA_USE_LLGUIDANCE
-    } else {
+    } else if (!gpu_sampling) {
         std::vector<std::string> trigger_patterns;
         std::vector<llama_token> trigger_tokens;
         for (const auto & trigger : params.grammar_triggers) {
@@ -271,7 +279,7 @@ struct common_sampler * common_sampler_init(
              }
         }
     }
-    if (!grmr && !grammar_str.empty()) {
+    if (!gpu_sampling && !grmr && !grammar_str.empty()) {
         throw std::runtime_error("failed to parse grammar");
     }
 
@@ -308,7 +316,7 @@ struct common_sampler * common_sampler_init(
     }
 
     // reasoning budget sampler (skip when budget is unlimited unless a lazy grammar is active, which needs rbudget for thinking-block suppression)
-    if (!params.reasoning_budget_start.empty() && !params.reasoning_budget_end.empty() && (params.grammar_lazy || params.reasoning_budget_tokens >= 0 || params.reasoning_control)) {
+    if (!gpu_sampling && !params.reasoning_budget_start.empty() && !params.reasoning_budget_end.empty() && (params.grammar_lazy || params.reasoning_budget_tokens >= 0 || params.reasoning_control)) {
         rbudget = common_reasoning_budget_init(
             vocab,
             {params.reasoning_budget_start},
@@ -320,6 +328,27 @@ struct common_sampler * common_sampler_init(
             llama_sampler_accept(rbudget, token);
             LOG_DBG("%s: reasoning-budget accepted prefill token (%d)\n", __func__, token);
         }
+    }
+
+    if (gpu_sampling) {
+        std::string trigger;
+        llama_token trigger_token = LLAMA_TOKEN_NULL;
+        if (!grammar_str.empty() && params.grammar_lazy) {
+            if (params.grammar_triggers.size() != 1 ||
+                (params.grammar_triggers[0].type != COMMON_GRAMMAR_TRIGGER_TYPE_WORD && params.grammar_triggers[0].type != COMMON_GRAMMAR_TRIGGER_TYPE_TOKEN)) {
+                throw std::runtime_error("GPU sampling supports one literal or token lazy trigger, not regex triggers");
+            }
+            trigger = params.grammar_triggers[0].value;
+            if (params.grammar_triggers[0].type == COMMON_GRAMMAR_TRIGGER_TYPE_TOKEN) trigger_token = params.grammar_triggers[0].token;
+        }
+        if (!grammar_str.empty() && !params.grammar_lazy && common_grammar_needs_prefill(params.grammar) && !prefill_tokens.empty()) {
+            throw std::runtime_error("GPU sampling: non-lazy output grammar prefill is not supported");
+        }
+        const bool suppress_thinking = params.grammar_lazy && !params.reasoning_budget_start.empty() && !params.reasoning_budget_end.empty();
+        samplers.push_back(llama_sampler_init_gpu_grammar(vocab, grammar_str, trigger,
+            suppress_thinking ? params.reasoning_budget_start : llama_tokens{},
+            suppress_thinking ? params.reasoning_budget_end : std::vector<llama_tokens>{},
+            suppress_thinking ? prefill_tokens : llama_tokens{}, params.seed, params.grammar_lazy, trigger_token));
     }
 
     // logit bias: user biases + model suppress tokens (-INFINITY)
@@ -493,7 +522,9 @@ void common_sampler_accept(struct common_sampler * gsmpl, llama_token token, boo
         llama_sampler_accept(gsmpl->grmr, token);
     }
 
-    llama_sampler_accept(gsmpl->chain, token);
+    if (!llama_gpu_sampling_enabled() || is_generated) {
+        llama_sampler_accept(gsmpl->chain, token);
+    }
 
     gsmpl->prev.push_back(token);
 }
@@ -598,6 +629,12 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
     const auto tm = gsmpl->tm();
 
     llama_token id = LLAMA_TOKEN_NULL;
+
+    if (llama_gpu_sampling_enabled()) {
+        id = llama_get_sampled_token_ith(ctx, idx);
+        if (id == LLAMA_TOKEN_NULL) throw std::runtime_error("GPU sampling returned no valid token; CPU fallback is forbidden");
+        return id;
+    }
 
     auto & grmr  = gsmpl->grmr;
     auto & rbudget = gsmpl->rbudget;

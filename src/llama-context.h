@@ -91,6 +91,13 @@ struct llama_context {
 
     float * get_embeddings_layer_inp(uint32_t lid);
 
+    bool set_dflash2_gpu_select(int32_t block_size);
+    bool set_dflash_gpu_features(const int32_t * layers, uint32_t count);
+    const ggml_tensor * get_dflash_gpu_features();
+    int decode_dflash_gpu_features(llama_context & target, const llama_batch_ext & batch, size_t offset);
+    const llama_token * get_dflash2_tokens();
+    void invalidate_dflash2_tokens() { dflash2_tokens_valid = false; }
+
     llama_token * get_sampled_tokens() const;
     llama_token   get_sampled_token_ith(int32_t idx);
 
@@ -312,6 +319,20 @@ private:
     // host buffers for output layer input embeddings, per layer
     // populated when cparams.output_layer_inp[il] is true
     std::vector<buffer_view<float>> embd_layer_inp;
+
+    int32_t dflash2_gpu_block_size = 0;
+    bool dflash2_tokens_valid = false;
+    buffer_view<llama_token> dflash2_tokens = {nullptr, 0};
+
+    ggml_context_ptr dflash_features_context;
+    ggml_backend_buffer_ptr dflash_features_buffer;
+    ggml_tensor * dflash_features = nullptr;
+    std::vector<int32_t> dflash_feature_layers;
+    std::vector<llama_pos> dflash_feature_positions;
+    size_t dflash_features_rows = 0;
+    bool dflash_features_valid = false;
+    const ggml_tensor * dflash_features_input = nullptr;
+    size_t dflash_features_offset = 0;
 
     struct sampling_info {
         // !samplers.empty() to check if any samplers are active

@@ -603,7 +603,7 @@ llama_model_dflash::graph<false>::graph(const llama_model & model, const llm_gra
     };
 
     // KV cache injection
-    if (ubatch.embd) {
+    if (ubatch.embd || cparams.dflash_device_features) {
         auto inp = std::make_unique<llm_graph_input_embd>(n_embd_inp);
 
         inp->embd = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_embd_inp, n_tokens);
@@ -612,7 +612,11 @@ llama_model_dflash::graph<false>::graph(const llama_model & model, const llm_gra
         ggml_tensor * inp_target = inp->embd;
         cb(inp_target, "inp_target_features", -1);
 
-        res->add_input(std::move(inp));
+        if (cparams.dflash_device_features) {
+            res->t_dflash_features = inp_target;
+        } else {
+            res->add_input(std::move(inp));
+        }
 
         // fuse the target features through the encoder
         ggml_tensor * inp_g = build_lora_mm(model.fc, inp_target, model.fc_s);

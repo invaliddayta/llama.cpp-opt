@@ -28,12 +28,15 @@
 #include "ggml-cuda/fattn.cuh"
 #include "ggml-cuda/fwht.cuh"
 #include "ggml-cuda/getrows.cuh"
+#include "ggml-cuda/grammar.cuh"
 #include "ggml-cuda/im2col.cuh"
 #include "ggml-cuda/mmf.cuh"
 #include "ggml-cuda/mmq.cuh"
 #include "ggml-cuda/mmvf.cuh"
 #include "ggml-cuda/mmvq.cuh"
 #include "ggml-cuda/mmsq.cuh"
+#include "ggml-cuda/dflash-select.cuh"
+#include "ggml-cuda/dflash-features.cuh"
 #include "ggml-cuda/moe-weighted-reduction.cuh"
 #include "ggml-cuda/norm.cuh"
 #include "ggml-cuda/opt-step-adamw.cuh"
@@ -2240,6 +2243,15 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             break;
         case GGML_OP_CONCAT:
             ggml_cuda_op_concat(ctx, dst);
+            break;
+        case GGML_OP_GRAMMAR_MASK:
+            ggml_cuda_op_grammar_mask(ctx, dst);
+            break;
+        case GGML_OP_GPU_UNIFORM:
+            ggml_cuda_op_gpu_uniform(ctx, dst);
+            break;
+        case GGML_OP_GPU_SAMPLE_CHECK:
+            ggml_cuda_op_gpu_sample_check(ctx, dst);
             break;
         case GGML_OP_UPSCALE:
             ggml_cuda_op_upscale(ctx, dst);
@@ -5189,6 +5201,13 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
     }
 
     switch (op->op) {
+        case GGML_OP_GRAMMAR_MASK:
+        case GGML_OP_GPU_UNIFORM:
+            return op->type == GGML_TYPE_F32 && ggml_is_contiguous(op->src[0]) &&
+                op->src[1]->type == GGML_TYPE_I32 && op->src[2]->type == GGML_TYPE_I32;
+        case GGML_OP_GPU_SAMPLE_CHECK:
+            return op->type == GGML_TYPE_I32 && ggml_nelements(op) == 1 && op->src[0]->type == GGML_TYPE_I32 &&
+                op->src[1]->type == GGML_TYPE_I32 && op->src[2]->type == GGML_TYPE_F32 && ggml_nelements(op->src[2]) == 1;
         case GGML_OP_UNARY:
             switch (ggml_get_unary_op(op)) {
                 case GGML_UNARY_OP_ABS:
@@ -5799,6 +5818,72 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t 
     GGML_UNUSED(reg);
 }
 
+static bool ggml_backend_cuda_dflash_select(ggml_backend_t backend, const ggml_tensor * lattice,
+        int top_k, int block_size, int32_t * output) {
+    if (!ggml_backend_is_cuda(backend) || !lattice || !output || top_k < 1 || top_k > 64 || block_size < 2 || block_size > 16 ||
+            lattice->type != GGML_TYPE_F32 || !ggml_is_contiguous(lattice) ||
+            lattice->ne[0] < (int64_t) top_k * (top_k + 1) || lattice->ne[0] > INT32_MAX ||
+            lattice->ne[1] < block_size || lattice->ne[1] > INT32_MAX || lattice->ne[1] % block_size != 0 ||
+            lattice->ne[2] != 1 || lattice->ne[3] != 1) {
+        return false;
+    }
+    auto * ctx = (ggml_backend_cuda_context *) backend->context;
+    ggml_backend_buffer_t buffer = lattice->view_src ? lattice->view_src->buffer : lattice->buffer;
+    if (!buffer || !ggml_backend_buffer_is_cuda(buffer) ||
+            ((ggml_backend_cuda_buffer_context *) buffer->context)->device != ctx->device) {
+        return false;
+    }
+    ggml_cuda_set_device(ctx->device);
+    const int rows = (int) lattice->ne[1];
+    const int sequences = rows / block_size;
+    ggml_cuda_pool_alloc<int32_t> tokens(ctx->pool(), rows);
+    dflash_select_lattice<<<(sequences + 31) / 32, 32, 0, ctx->stream()>>>(
+            (const float *) lattice->data, tokens.get(), (int) lattice->ne[0], top_k, block_size, sequences);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaMemcpyAsync(output, tokens.get(), (size_t) rows * sizeof(int32_t), cudaMemcpyDeviceToHost, ctx->stream()));
+    return true;
+}
+
+static bool ggml_backend_cuda_dflash_features_tensor(ggml_backend_t backend, const ggml_tensor * tensor) {
+    if (!ggml_backend_is_cuda(backend) || !tensor || !tensor->data || tensor->type != GGML_TYPE_F32 ||
+            !ggml_is_contiguous(tensor) || tensor->ne[0] <= 0 || tensor->ne[1] <= 0 || tensor->ne[2] != 1 || tensor->ne[3] != 1) {
+        return false;
+    }
+    auto * ctx = (ggml_backend_cuda_context *) backend->context;
+    auto * buffer = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
+    return buffer && ggml_backend_buffer_is_cuda(buffer) &&
+            ((ggml_backend_cuda_buffer_context *) buffer->context)->device == ctx->device;
+}
+
+static bool ggml_backend_cuda_dflash_features_stage(ggml_backend_t backend, const ggml_tensor * src,
+        ggml_tensor * dst, size_t layer, size_t begin) {
+    if (!ggml_backend_cuda_dflash_features_tensor(backend, src) || !ggml_backend_cuda_dflash_features_tensor(backend, dst) ||
+            src->data == dst->data || dst->ne[0] % src->ne[0] != 0 || dst->ne[0] / src->ne[0] > 8 ||
+            layer >= (size_t) (dst->ne[0] / src->ne[0]) || begin > (size_t) dst->ne[1] ||
+            (size_t) src->ne[1] > (size_t) dst->ne[1] - begin) {
+        return false;
+    }
+    auto * ctx = (ggml_backend_cuda_context *) backend->context;
+    ggml_cuda_set_device(ctx->device);
+    CUDA_CHECK(dflash_stage_features((const float *) src->data, (float *) dst->data, src->ne[0],
+            dst->ne[0] / src->ne[0], layer, begin, src->ne[1], ctx->stream()));
+    return true;
+}
+
+static bool ggml_backend_cuda_dflash_features_copy(ggml_backend_t backend, const ggml_tensor * src,
+        ggml_tensor * dst, size_t begin) {
+    if (!ggml_backend_cuda_dflash_features_tensor(backend, src) || !ggml_backend_cuda_dflash_features_tensor(backend, dst) ||
+            src->data == dst->data || src->ne[0] != dst->ne[0] || begin > (size_t) src->ne[1] ||
+            (size_t) dst->ne[1] > (size_t) src->ne[1] - begin) {
+        return false;
+    }
+    auto * ctx = (ggml_backend_cuda_context *) backend->context;
+    ggml_cuda_set_device(ctx->device);
+    CUDA_CHECK(dflash_copy_features((const float *) src->data, (float *) dst->data,
+            src->ne[0], begin, dst->ne[1], ctx->stream()));
+    return true;
+}
+
 static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, const char * name) {
     GGML_UNUSED(reg);
     if (strcmp(name, "ggml_backend_comm_init") == 0) {
@@ -5818,6 +5903,15 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
     }
     if (strcmp(name, "ggml_backend_get_features") == 0) {
         return (void *)ggml_backend_cuda_get_features;
+    }
+    if (strcmp(name, "ggml_backend_dflash_select") == 0) {
+        return (void *)ggml_backend_cuda_dflash_select;
+    }
+    if (strcmp(name, "ggml_backend_dflash_features_stage") == 0) {
+        return (void *)ggml_backend_cuda_dflash_features_stage;
+    }
+    if (strcmp(name, "ggml_backend_dflash_features_copy") == 0) {
+        return (void *)ggml_backend_cuda_dflash_features_copy;
     }
     return nullptr;
 }

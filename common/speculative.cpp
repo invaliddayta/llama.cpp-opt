@@ -9,6 +9,7 @@
 #include "ngram-map.h"
 #include "ngram-mod.h"
 #include "sampling.h"
+#include "../src/llama-gpu-sampling.h"
 
 #include "../src/llama-ext.h" // staging API: llama_set_embeddings_nextn / llama_get_embeddings_nextn_ith (used by MTP)
 
@@ -941,6 +942,8 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
     llama_token mask_token_id = 0;
 
     bool    is_dflash2     = false;
+    bool    dflash2_gpu_select = false;
+    bool    dflash_gpu_features = false;
     bool    is_mrope       = false;
     int32_t selector_top_k = 0;
 
@@ -1028,8 +1031,14 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         // embd batches on an M-RoPE draft carry 4 position rows per token
         is_mrope = llama_model_rope_type(model_dft) == LLAMA_ROPE_TYPE_MROPE;
 
+        const bool gpu_sampling = llama_gpu_sampling_enabled();
+        if (gpu_sampling && (!is_dflash2 || n_seq != 1 || this->params.p_min != 0.0f)) {
+            throw std::runtime_error("GPU sampling requires single-sequence DFlash2 with p_min=0");
+        }
+
         smpls.resize(n_seq);
         for (auto & s : smpls) {
+            if (gpu_sampling) continue;
             common_params_sampling sparams;
             sparams.no_perf  = false;
             sparams.top_k    = 10;
@@ -1057,10 +1066,23 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         for (uint32_t k = 0; k < target_layer_ids_n; ++k) {
             llama_set_embeddings_layer_inp(ctx_tgt, (uint32_t) target_layer_ids[k], true);
         }
+        const char * gpu_features = std::getenv("LLAMA_DFLASH_GPU_FEATURES");
+        if (gpu_features && std::atoi(gpu_features) != 0) {
+            if (!is_dflash2 || n_seq != 1 || !llama_set_dflash_gpu_features(ctx_tgt, target_layer_ids, target_layer_ids_n)) {
+                throw std::runtime_error("DFlash GPU features require single-sequence, full same-device CUDA offload");
+            }
+            dflash_gpu_features = true;
+        }
 
         // DFlash2 reads its selector lattice from h_nextn and never consumes raw logits.
         llama_set_embeddings_nextn(ctx_dft, true, /*masked*/ !is_dflash2);
         llama_set_causal_attn(ctx_dft, causal_attn); // DFlash needs non-causal attention unless the model says otherwise
+        const char * gpu_select = std::getenv("LLAMA_DFLASH_GPU_SELECT");
+        if ((gpu_sampling || (gpu_select && std::atoi(gpu_select) != 0)) && is_dflash2) {
+            GGML_ASSERT(n_seq == 1 && this->params.p_min == 0.0f);
+            dflash2_gpu_select = llama_set_dflash2_gpu_select(ctx_dft, this->params.n_max + 1);
+            GGML_ASSERT(dflash2_gpu_select && "DFlash2 GPU selector unavailable; refusing CPU fallback");
+        }
     }
 
     ~common_speculative_impl_draft_dflash() override {
@@ -1146,6 +1168,18 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
 
             for (int32_t offset = 0; offset < n_rows; offset += n_ubatch) {
                 const int32_t n_chunk = std::min(n_ubatch, n_rows - offset);
+
+                if (dflash_gpu_features) {
+                    batch_inject.clear();
+                    for (int32_t i = 0; i < n_chunk; ++i) {
+                        batch_inject.add(mask_token_id, batch_in.tokens[i_batch_beg[seq_id] + offset + i].pos[0], seq_id, false);
+                    }
+                    const int32_t rc = llama_process_dflash_gpu_features(ctx_dft, ctx_tgt, batch_inject.get(), i_batch_beg[seq_id] + offset);
+                    if (rc != 0) {
+                        throw std::runtime_error("DFlash GPU feature injection failed; CPU fallback forbidden");
+                    }
+                    continue;
+                }
 
                 // gather target features per extract layer; the fused decode encodes and
                 // injects them into the K/V cache at the target positions
@@ -1235,6 +1269,17 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
             auto & result = *dp.result;
 
             if (is_dflash2) {
+                if (dflash2_gpu_select) {
+                    const llama_token * tokens = llama_get_dflash2_tokens(ctx_dft);
+                    GGML_ASSERT(tokens);
+                    for (int32_t i = 1; i < n_block_tokens; ++i) {
+                        result.push_back(tokens[beg + i]);
+                    }
+                    if (result.size() < (size_t) params.n_min) {
+                        result.clear();
+                    }
+                    continue;
+                }
                 const float * lattice = llama_get_embeddings_nextn(ctx_dft);
                 GGML_ASSERT(lattice && "DFlash2 selector produced no lattice");
 

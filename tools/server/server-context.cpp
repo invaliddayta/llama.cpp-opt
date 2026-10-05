@@ -11,6 +11,7 @@
 #include "common.h"
 #include "fit.h"
 #include "llama.h"
+#include "../../src/llama-gpu-sampling.h"
 #include "log.h"
 #include "sampling.h"
 #include "speculative.h"
@@ -1809,10 +1810,18 @@ private:
             use_backend_sampling &= !need_pre_sample_logits;
 
             // TODO: tmp until backend sampling is fully implemented
-            if (use_backend_sampling) {
-                llama_set_sampler(ctx_tgt, slot.id, common_sampler_get(slot.smpl.get()));
-            } else {
+            try {
+                if (use_backend_sampling) {
+                    if (!llama_set_sampler(ctx_tgt, slot.id, common_sampler_get(slot.smpl.get())) && llama_gpu_sampling_enabled()) {
+                        throw std::runtime_error("Failed to attach backend sampler");
+                    }
+                } else {
+                    llama_set_sampler(ctx_tgt, slot.id, nullptr);
+                }
+            } catch (const std::exception & e) {
                 llama_set_sampler(ctx_tgt, slot.id, nullptr);
+                send_error(task, e.what(), ERROR_TYPE_INVALID_REQUEST);
+                return false;
             }
 
             SLT_TRC(slot, "sampler chain: %s\n", common_sampler_print(slot.smpl.get()).c_str());

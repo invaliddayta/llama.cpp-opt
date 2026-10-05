@@ -5,6 +5,7 @@
 #include "llama-batch.h"
 #include "llama-cparams.h"
 #include "llama-sampler.h"
+#include "llama-gpu-sampling.h"
 
 #include "llama-kv-cache.h"
 #include "llama-kv-cache-iswa.h"
@@ -1326,6 +1327,7 @@ void llm_graph_result::reset() {
     t_embd        = nullptr;
     t_embd_pooled = nullptr;
     t_h_nextn     = nullptr;
+    t_dflash_features = nullptr;
 
     t_layer_inp.resize(LLAMA_MAX_LAYERS + 1);
     std::fill(t_layer_inp.begin(), t_layer_inp.end(), nullptr);
@@ -3846,6 +3848,10 @@ void llm_graph_context::build_sampling() const {
 
             assert(sampler->iface->backend_apply);
             sampler->iface->backend_apply(sampler, ctx0, gf, &data);
+
+            if (llama_gpu_sampling_enabled() && data.sampled && sampler->iface->backend_accept) {
+                sampler->iface->backend_accept(sampler, ctx0, gf, data.sampled);
+            }
 
             if (data.sampled != nullptr) {
                 if (active) {

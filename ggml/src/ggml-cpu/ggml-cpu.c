@@ -1744,6 +1744,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
     }
 
     switch (tensor->op) {
+        case GGML_OP_GRAMMAR_MASK:
+        case GGML_OP_GPU_UNIFORM:
+        case GGML_OP_GPU_SAMPLE_CHECK:
+            GGML_ABORT("CUDA-only sampling operation cannot run on CPU");
         case GGML_OP_DUP:
             {
                 ggml_compute_forward_dup(params, tensor);

@@ -440,6 +440,10 @@ static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const st
     }
 
     switch (op->op) {
+        case GGML_OP_GRAMMAR_MASK:
+        case GGML_OP_GPU_UNIFORM:
+        case GGML_OP_GPU_SAMPLE_CHECK:
+            return false;
         case GGML_OP_CPY:
         case GGML_OP_SET_ROWS:
             return

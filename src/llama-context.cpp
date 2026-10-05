@@ -11,9 +11,12 @@
 #include "llama-model.h"
 #include "llama-ext.h"
 #include "llama-sampler.h"
+#include "llama-gpu-sampling.h"
 #include "llama.h"
+#include "../ggml/src/ggml-dflash-features.h"
 
 #include <cinttypes>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -1035,6 +1038,7 @@ float * llama_context::get_embeddings_nextn_ith(int32_t i) {
 }
 
 float * llama_context::get_embeddings_layer_inp(uint32_t lid) {
+    if (dflash_features) throw std::runtime_error("DFlash GPU features: host extraction is disabled");
     output_reorder();
 
     GGML_ASSERT(lid < embd_layer_inp.size() && embd_layer_inp[lid].has_data());
@@ -1233,6 +1237,10 @@ void llama_context::set_embeddings_layer_inp(uint32_t lid, bool enable) {
     LLAMA_LOG_DEBUG("%s: lid = %d, enable = %d\n", __func__, lid, enable);
 
     GGML_ASSERT(lid <= model.hparams.n_layer());
+    dflash_features_valid = false;
+    if (dflash_features && enable != (std::find(dflash_feature_layers.begin(), dflash_feature_layers.end(), (int32_t) lid) != dflash_feature_layers.end())) {
+        throw std::runtime_error("DFlash GPU features: extraction layers cannot change after setup");
+    }
 
     cparams.embeddings_layer_inp[lid] = enable;
 
@@ -1449,6 +1457,19 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
 
         // FIXME this call causes a crash if any model inputs were not used in the graph and were therefore not allocated
         res->set_inputs(&ubatch);
+        if (cparams.dflash_device_features) {
+            auto * tensor = res->t_dflash_features;
+            auto * backend = tensor ? ggml_backend_sched_get_tensor_backend(sched.get(), tensor) : nullptr;
+            auto * device = backend ? ggml_backend_get_device(backend) : nullptr;
+            auto * reg = device ? ggml_backend_dev_backend_reg(device) : nullptr;
+            auto copy = reg ? (ggml_backend_dflash_features_copy_t) ggml_backend_reg_get_proc_address(reg, "ggml_backend_dflash_features_copy") : nullptr;
+            if (!copy || !dflash_features_input || !copy(backend, dflash_features_input, tensor, dflash_features_offset)) {
+                LLAMA_LOG_ERROR("%s: feature input backend=%s buffer=%s\n", __func__,
+                        backend ? ggml_backend_name(backend) : "none",
+                        tensor && tensor->buffer ? ggml_backend_buffer_name(tensor->buffer) : "none");
+                throw std::runtime_error("DFlash GPU features: same-device CUDA input copy required; CPU fallback forbidden");
+            }
+        }
 
         //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
     }
@@ -1466,6 +1487,8 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
 }
 
 int llama_context::encode(const llama_batch_ext & batch_inp) {
+    invalidate_dflash2_tokens();
+    dflash_features_valid = false;
     if (batch_inp.tokens.empty()) {
         LLAMA_LOG_ERROR("%s: n_tokens == 0\n", __func__);
         return -1;
@@ -1705,6 +1728,9 @@ static bool needs_raw_logits(const llama_ubatch & ubatch, const std::map<llama_s
 }
 
 int llama_context::decode(const llama_batch_ext & batch_inp) {
+    invalidate_dflash2_tokens();
+    dflash_features_valid = false;
+    dflash_features_rows = 0;
     if (!memory) {
         LLAMA_LOG_DEBUG("%s: cannot decode batches with this context (calling encode() instead)\n", __func__);
         return encode(batch_inp);
@@ -1767,6 +1793,23 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
 
     const uint32_t n_tokens_all  = balloc->get_n_tokens();
     const uint32_t n_outputs_all = balloc->get_n_outputs();
+
+    if (dflash_features) {
+        for (size_t i = 0; i < batch_inp.tokens.size(); ++i) {
+            const auto & token = batch_inp.tokens[i];
+            if (token.seq_ids.size() != 1 || token.seq_ids.count(0) != 1) {
+                throw std::runtime_error("DFlash GPU features: target batch requires sequence zero only");
+            }
+            if (i && token.pos[0] < batch_inp.tokens[i - 1].pos[0]) {
+                throw std::runtime_error("DFlash GPU features: target positions must be ordered");
+            }
+        }
+    }
+
+    if (llama_gpu_sampling_enabled() && has_samplers && n_outputs_all > 1 && n_tokens_all > cparams.n_ubatch) {
+        LLAMA_LOG_ERROR("%s: GPU sampling requires speculative outputs to fit one ubatch\n", __func__);
+        return -1;
+    }
 
     if (output_all) {
         // require that all tokens are output
@@ -1863,6 +1906,23 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
 
     do {
         const auto & ubatch = mctx->get_ubatch();
+
+        if (cparams.dflash_device_features && ubatch.n_tokens != n_tokens_all) {
+            LLAMA_LOG_ERROR("%s: device feature injection requires one actual microbatch\n", __func__);
+            return -1;
+        }
+        if (dflash_features) {
+            for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
+                if (ubatch.pos[i] != batch_inp.tokens[n_tokens_prev + i].pos[0]) {
+                    throw std::runtime_error("DFlash GPU features: reordered target microbatch is unsupported");
+                }
+            }
+        }
+
+        if (llama_gpu_sampling_enabled() && has_samplers && n_outputs_all > 1 && ubatch.n_tokens != n_tokens_all) {
+            LLAMA_LOG_ERROR("%s: GPU sampling requires one actual speculative microbatch\n", __func__);
+            return -1;
+        }
 
         // count the outputs in this ubatch
         {
@@ -2012,7 +2072,21 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
             const int64_t n_rows = masked ? n_outputs       : (int64_t) ubatch.n_tokens;
             const int64_t offset = masked ? n_outputs_prev  : n_tokens_prev;
 
-            if (embd_nextn.data && t_h_nextn && n_rows > 0 && cparams.pooling_type == LLAMA_POOLING_TYPE_NONE) {
+            if (dflash2_gpu_block_size > 0 && t_h_nextn && n_rows > 0) {
+                GGML_ASSERT(!masked);
+                // Cache probes can decode shorter token batches without consuming proposals.
+                if (ubatch.n_seqs_unq == 1 && n_rows == dflash2_gpu_block_size && offset == 0 && batch_inp.tokens.size() == (size_t) n_rows) {
+                    GGML_ASSERT((size_t) n_rows <= dflash2_tokens.size);
+                    ggml_backend_t backend_h = ggml_backend_sched_get_tensor_backend(sched.get(), t_h_nextn);
+                    GGML_ASSERT(backend_h != nullptr);
+                    auto * reg = ggml_backend_dev_backend_reg(ggml_backend_get_device(backend_h));
+                    using select_fn = bool (*)(ggml_backend_t, const ggml_tensor *, int, int, int32_t *);
+                    auto select = (select_fn) ggml_backend_reg_get_proc_address(reg, "ggml_backend_dflash_select");
+                    GGML_ASSERT(select && select(backend_h, t_h_nextn, hparams.dflash_selector_top_k,
+                            dflash2_gpu_block_size, dflash2_tokens.data));
+                    dflash2_tokens_valid = true;
+                }
+            } else if (embd_nextn.data && t_h_nextn && n_rows > 0 && cparams.pooling_type == LLAMA_POOLING_TYPE_NONE) {
                 ggml_backend_t backend_h = ggml_backend_sched_get_tensor_backend(sched.get(), t_h_nextn);
                 GGML_ASSERT(backend_h != nullptr);
 
@@ -2091,12 +2165,119 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
     // wait for the computation to finish (automatically done when obtaining the model output)
     //synchronize();
 
+    if (dflash_features) {
+        dflash_feature_positions.clear();
+        for (const auto & token : batch_inp.tokens) dflash_feature_positions.push_back(token.pos[0]);
+        dflash_features_valid = dflash_features_rows == n_tokens_all;
+    }
     return 0;
 }
 
 //
 // output
 //
+
+bool llama_context::set_dflash_gpu_features(const int32_t * layers, uint32_t count) {
+    if (!layers || count < 1 || count > 8 || dflash_features || n_seq_max() != 1 ||
+            !cparams.offload_kqv || !cparams.op_offload || cparams.pooling_type != LLAMA_POOLING_TYPE_NONE ||
+            model.n_gpu_layers() <= model.hparams.n_layer_all) {
+        return false;
+    }
+    auto * device = model.dev_output();
+    auto * reg = device ? ggml_backend_dev_backend_reg(device) : nullptr;
+    if (!reg || !ggml_backend_reg_get_proc_address(reg, "ggml_backend_dflash_features_stage")) return false;
+    for (uint32_t il = 0; il < model.hparams.n_layer(); ++il) {
+        if (model.dev_layer(il) != device) return false;
+    }
+    std::vector<int32_t> selected(layers, layers + count);
+    for (uint32_t i = 0; i < count; ++i) {
+        if (selected[i] < 0 || selected[i] >= (int32_t) model.hparams.n_layer() ||
+                std::find(selected.begin(), selected.begin() + i, selected[i]) != selected.begin() + i) return false;
+    }
+    for (uint32_t il = 0; il < cparams.embeddings_layer_inp.size(); ++il) {
+        const bool enabled = std::find(selected.begin(), selected.end(), (int32_t) il) != selected.end();
+        if (enabled != cparams.embeddings_layer_inp[il] || (enabled && model.dev_layer(il) != device)) return false;
+    }
+    synchronize();
+    ggml_context_ptr context(ggml_init({ggml_tensor_overhead(), nullptr, true}));
+    if (!context) return false;
+    auto * tensor = ggml_new_tensor_2d(context.get(), GGML_TYPE_F32, (int64_t) model.hparams.n_embd * count, cparams.n_batch);
+    ggml_set_name(tensor, "dflash_target_features");
+    ggml_backend_buffer_ptr buffer(ggml_backend_alloc_ctx_tensors_from_buft(context.get(), ggml_backend_dev_buffer_type(device)));
+    if (!buffer) return false;
+    dflash_features_context = std::move(context);
+    dflash_features_buffer = std::move(buffer);
+    dflash_features = tensor;
+    dflash_feature_layers = std::move(selected);
+    dflash_features_valid = false;
+    return true;
+}
+
+const ggml_tensor * llama_context::get_dflash_gpu_features() {
+    synchronize();
+    return dflash_features_valid ? dflash_features : nullptr;
+}
+
+int llama_context::decode_dflash_gpu_features(llama_context & target, const llama_batch_ext & batch, size_t offset) {
+    const size_t rows = batch.tokens.size();
+    const auto * source = target.get_dflash_gpu_features();
+    if (model.arch != LLM_ARCH_DFLASH || model.hparams.dflash_selector_top_k <= 0 || !source ||
+            model.n_gpu_layers() <= model.hparams.n_layer_all || !cparams.offload_kqv || !cparams.op_offload ||
+            model.dev_output() != target.model.dev_output() || model.hparams.n_embd_inp_enc() != source->ne[0] ||
+            n_seq_max() != 1 || rows < 1 || rows > cparams.n_ubatch || offset > target.dflash_features_rows ||
+            rows > target.dflash_features_rows - offset || cparams.dflash_device_features || batch.n_embd != 0) {
+        return -1;
+    }
+    for (uint32_t il = 0; il < model.hparams.n_layer(); ++il) {
+        if (model.dev_layer(il) != model.dev_output()) return -1;
+    }
+    for (size_t i = 0; i < rows; ++i) {
+        const auto & token = batch.tokens[i];
+        if (token.id == LLAMA_TOKEN_NULL || token.has_embd || token.output || token.seq_ids.size() != 1 || token.seq_ids.count(0) != 1 ||
+                token.pos[0] != target.dflash_feature_positions[offset + i] ||
+                (i && token.pos[0] <= batch.tokens[i - 1].pos[0])) return -1;
+    }
+    cparams.dflash_device_features = true;
+    dflash_features_input = source;
+    dflash_features_offset = offset;
+    struct restore {
+        llama_context & ctx;
+        ~restore() {
+            ctx.synchronize();
+            ctx.cparams.dflash_device_features = false;
+            ctx.dflash_features_input = nullptr;
+        }
+    } guard{*this};
+    return decode(batch);
+}
+
+bool llama_context::set_dflash2_gpu_select(int32_t block_size) {
+    const auto & hp = model.hparams;
+    if (model.arch != LLM_ARCH_DFLASH || hp.dflash_selector_top_k < 1 || hp.dflash_selector_top_k > 64 ||
+            block_size < 2 || block_size > hp.dflash_block_size || block_size > 16 ||
+            block_size > (int32_t) cparams.n_ubatch || n_seq_max() != 1 ||
+            cparams.pooling_type != LLAMA_POOLING_TYPE_NONE || !cparams.embeddings_nextn || cparams.embeddings_nextn_masked) {
+        return false;
+    }
+    auto * output_dev = model.dev_output();
+    if (!output_dev) {
+        return false;
+    }
+    auto * reg = ggml_backend_dev_backend_reg(output_dev);
+    if (!ggml_backend_reg_get_proc_address(reg, "ggml_backend_dflash_select")) {
+        return false;
+    }
+    synchronize();
+    dflash2_gpu_block_size = block_size;
+    dflash2_tokens_valid = false;
+    LLAMA_LOG_INFO("%s: enabled GPU selector, block_size=%d\n", __func__, block_size);
+    return true;
+}
+
+const llama_token * llama_context::get_dflash2_tokens() {
+    synchronize();
+    return dflash2_tokens_valid ? dflash2_tokens.data : nullptr;
+}
 
 uint32_t llama_context::output_reserve(int32_t n_outputs) {
     const auto & hparams = model.hparams;
@@ -2111,7 +2292,9 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
 
     bool has_logits     = true;
     bool has_embd       = cparams.embeddings;
-    bool has_embd_nextn = cparams.embeddings_nextn;
+    bool has_embd_nextn = cparams.embeddings_nextn && dflash2_gpu_block_size == 0;
+    dflash2_tokens_valid = false;
+    const size_t dflash2_token_count = dflash2_gpu_block_size > 0 ? n_batch : 0;
 
     // TODO: hacky enc-dec support
     if (model.arch == LLM_ARCH_T5) {
@@ -2134,7 +2317,7 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
     }
 
     for (bool enabled : cparams.embeddings_layer_inp) {
-        if (enabled) {
+        if (enabled && !dflash_features) {
             embd_layer_inp_float_count += (size_t) n_embd * n_batch;
         }
     }
@@ -2154,7 +2337,7 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
     const size_t prev_size = buf_output ? ggml_backend_buffer_get_size(buf_output.get()) : 0;
     const size_t new_size  =
         (logits.size + embd.size + embd_nextn.size + embd_layer_inp_float_count + backend_float_count) * sizeof(float) +
-        (                                                                         backend_token_count) * sizeof(llama_token);
+        (dflash2_token_count + backend_token_count) * sizeof(llama_token);
 
     // alloc only when more than the current capacity is required
     // TODO: also consider shrinking the buffer
@@ -2171,6 +2354,7 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
             logits.data = nullptr;
             embd.data = nullptr;
             embd_nextn.data = nullptr;
+            dflash2_tokens.data = nullptr;
             for (auto & layer_inp : embd_layer_inp) {
                 layer_inp = {nullptr, 0};
             }
@@ -2205,8 +2389,11 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
     embd_nextn = has_embd_nextn ? buffer_view<float>{(float *) (base + offset), embd_nextn.size} : buffer_view<float>{nullptr, 0};
     offset += embd_nextn.size * sizeof(float);
 
+    dflash2_tokens = dflash2_token_count ? buffer_view<llama_token>{(llama_token *) (base + offset), dflash2_token_count} : buffer_view<llama_token>{nullptr, 0};
+    offset += dflash2_token_count * sizeof(llama_token);
+
     for (uint32_t il = 0; il < embd_layer_inp.size(); ++il) {
-        if (cparams.embeddings_layer_inp[il]) {
+        if (cparams.embeddings_layer_inp[il] && !dflash_features) {
             embd_layer_inp[il] = buffer_view<float>{(float *) (base + offset), (size_t) n_embd * n_batch};
             offset += embd_layer_inp[il].size * sizeof(float);
         } else {
@@ -2261,6 +2448,21 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
 }
 
 void llama_context::extract_layer_inputs(const llm_graph_result * res, size_t token_offset, size_t n_tokens) {
+    if (dflash_features) {
+        for (size_t k = 0; k < dflash_feature_layers.size(); ++k) {
+            auto * tensor = res->get_layer_inp(dflash_feature_layers[k]);
+            auto * backend = tensor ? ggml_backend_sched_get_tensor_backend(sched.get(), tensor) : nullptr;
+            auto * device = backend ? ggml_backend_get_device(backend) : nullptr;
+            auto * reg = device ? ggml_backend_dev_backend_reg(device) : nullptr;
+            auto stage = reg ? (ggml_backend_dflash_features_stage_t) ggml_backend_reg_get_proc_address(reg, "ggml_backend_dflash_features_stage") : nullptr;
+            if (!stage || tensor->ne[0] != model.hparams.n_embd || tensor->ne[1] != (int64_t) n_tokens ||
+                    !stage(backend, tensor, dflash_features, k, token_offset)) {
+                throw std::runtime_error("DFlash GPU features: CUDA target staging failed; CPU extraction forbidden");
+            }
+        }
+        dflash_features_rows = token_offset + n_tokens;
+        return;
+    }
     for (uint32_t il = 0; il < cparams.embeddings_layer_inp.size(); ++il) {
         if (!cparams.embeddings_layer_inp[il]) {
             continue;
@@ -2600,6 +2802,14 @@ llm_graph_cb llama_context::graph_get_cb() const {
             ggml_format_name(cur, "%s-%d", name, il);
         } else {
             ggml_set_name(cur, name);
+        }
+
+        if (cparams.dflash_device_features && strcmp(name, "inp_target_features") == 0) {
+            for (const auto & backend : backends) {
+                if (ggml_backend_get_device(backend.get()) == model.dev_output()) {
+                    ggml_backend_sched_set_tensor_backend(sched.get(), cur, backend.get());
+                }
+            }
         }
 
         // - norm may be automatically assigned to the backend of the previous layer, increasing data transfer between backends
@@ -3377,6 +3587,7 @@ size_t llama_context::state_write_data(llama_io_write_i & io) {
 }
 
 size_t llama_context::state_read_data(llama_io_read_i & io) {
+    dflash_features_valid = false;
     LLAMA_LOG_DEBUG("%s: reading state\n", __func__);
 
     // read model info
@@ -3411,6 +3622,7 @@ size_t llama_context::state_seq_write_data(llama_io_write_i & io, llama_seq_id s
 }
 
 size_t llama_context::state_seq_read_data(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
+    dflash_features_valid = false;
     if (memory) {
         memory->state_read(io, seq_id, flags);
     }
@@ -4017,6 +4229,26 @@ float * llama_get_embeddings_nextn_ith(llama_context * ctx, int32_t i) {
     return ctx->get_embeddings_nextn_ith(i);
 }
 
+bool llama_set_dflash2_gpu_select(llama_context * ctx, int32_t block_size) {
+    return ctx->set_dflash2_gpu_select(block_size);
+}
+
+bool llama_set_dflash_gpu_features(llama_context * ctx, const int32_t * layers, uint32_t count) {
+    return ctx->set_dflash_gpu_features(layers, count);
+}
+
+const ggml_tensor * llama_get_dflash_gpu_features(llama_context * ctx) {
+    return ctx->get_dflash_gpu_features();
+}
+
+int32_t llama_process_dflash_gpu_features(llama_context * draft, llama_context * target, llama_batch_ext * batch, size_t offset) {
+    return draft->decode_dflash_gpu_features(*target, *batch, offset);
+}
+
+const llama_token * llama_get_dflash2_tokens(llama_context * ctx) {
+    return ctx->get_dflash2_tokens();
+}
+
 float * llama_get_embeddings_layer_inp(llama_context * ctx, uint32_t lid) {
     ctx->synchronize();
 
@@ -4331,11 +4563,15 @@ size_t llama_state_seq_load_file(llama_context * ctx, const char * filepath, lla
 // compat: llama_batch -> llama_batch_ext -> encode/decode
 
 int llama_context::encode(const llama_batch & batch_inp) {
+    invalidate_dflash2_tokens();
+    dflash_features_valid = false;
     llama_batch_compat compat(this, batch_inp, model.hparams.n_embd_inp_enc());
     return encode(*compat.batch_ext);
 }
 
 int llama_context::decode(const llama_batch & batch_inp) {
+    invalidate_dflash2_tokens();
+    dflash_features_valid = false;
     llama_batch_compat compat(this, batch_inp);
     return decode(*compat.batch_ext);
 }
@@ -4430,6 +4666,7 @@ void llama_opt_epoch(
 }
 
 int32_t llama_process(llama_context * ctx, llama_process_type type, llama_batch_ext * batch) {
+    ctx->invalidate_dflash2_tokens();
     switch (type) {
         case LLAMA_PROCESS_TYPE_ENCODE: return ctx->encode(*batch);
         case LLAMA_PROCESS_TYPE_DECODE: return ctx->decode(*batch);

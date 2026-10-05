@@ -1099,9 +1099,12 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "OPT_STEP_SGD",
 
     "GLU",
+    "GRAMMAR_MASK",
+    "GPU_UNIFORM",
+    "GPU_SAMPLE_CHECK",
 };
 
-static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
+static_assert(GGML_OP_COUNT == 104, "GGML_OP_COUNT != 104");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1214,9 +1217,12 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "sgd(x)",
 
     "glu(x)",
+    "grammar_mask(logits, tables, state, pending, previous)",
+    "gpu_uniform(dependency, tables, state)",
+    "gpu_sample_check(sampled, state, masked_logits)",
 };
 
-static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
+static_assert(GGML_OP_COUNT == 104, "GGML_OP_COUNT != 104");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -1359,6 +1365,49 @@ bool ggml_is_quantized(enum ggml_type type) {
     assert(type >= 0);
     assert(type < GGML_TYPE_COUNT);
     return type_traits[type].is_quantized;
+}
+
+struct ggml_tensor * ggml_grammar_mask(
+        struct ggml_context * ctx, struct ggml_tensor * logits, struct ggml_tensor * tables,
+        struct ggml_tensor * state, struct ggml_tensor * pending, struct ggml_tensor * previous) {
+    GGML_ASSERT(logits->type == GGML_TYPE_F32 && ggml_is_vector(logits) && ggml_is_contiguous(logits));
+    GGML_ASSERT(tables->type == GGML_TYPE_I32 && state->type == GGML_TYPE_I32 && pending->type == GGML_TYPE_I32);
+    GGML_ASSERT(ggml_is_contiguous(tables) && ggml_is_contiguous(state) && ggml_is_contiguous(pending));
+    GGML_ASSERT(!previous || (previous->type == GGML_TYPE_I32 && ggml_nelements(previous) == 1));
+    struct ggml_tensor * result = ggml_dup_tensor(ctx, logits);
+    result->op = GGML_OP_GRAMMAR_MASK;
+    result->src[0] = logits;
+    result->src[1] = tables;
+    result->src[2] = state;
+    result->src[3] = pending;
+    result->src[4] = previous;
+    return result;
+}
+
+struct ggml_tensor * ggml_gpu_uniform(
+        struct ggml_context * ctx, struct ggml_tensor * dependency, struct ggml_tensor * tables,
+        struct ggml_tensor * state) {
+    GGML_ASSERT(tables->type == GGML_TYPE_I32 && state->type == GGML_TYPE_I32);
+    struct ggml_tensor * result = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+    result->op = GGML_OP_GPU_UNIFORM;
+    result->src[0] = dependency;
+    result->src[1] = tables;
+    result->src[2] = state;
+    return result;
+}
+
+struct ggml_tensor * ggml_gpu_sample_check(
+        struct ggml_context * ctx, struct ggml_tensor * sampled, struct ggml_tensor * state,
+        struct ggml_tensor * selected_logit, int32_t n_vocab) {
+    GGML_ASSERT(sampled->type == GGML_TYPE_I32 && ggml_nelements(sampled) == 1);
+    GGML_ASSERT(selected_logit->type == GGML_TYPE_F32 && ggml_nelements(selected_logit) == 1 && n_vocab > 0);
+    struct ggml_tensor * result = ggml_dup_tensor(ctx, sampled);
+    result->op = GGML_OP_GPU_SAMPLE_CHECK;
+    result->src[0] = sampled;
+    result->src[1] = state;
+    result->src[2] = selected_logit;
+    ggml_set_op_params(result, &n_vocab, sizeof(n_vocab));
+    return result;
 }
 
 const char * ggml_op_name(enum ggml_op op) {

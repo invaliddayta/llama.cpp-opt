@@ -114,6 +114,12 @@ LLAMA_API void llama_set_embeddings_layer_inp(struct llama_context * ctx, uint32
 // LLAMA_API float * llama_get_embeddings(struct llama_context * ctx);
 LLAMA_API float * llama_get_embeddings_layer_inp(struct llama_context * ctx, uint32_t lid);
 
+// Same-device CUDA target feature staging and scoped DFlash2 KV injection.
+LLAMA_API bool llama_set_dflash_gpu_features(struct llama_context * ctx, const int32_t * layers, uint32_t count);
+LLAMA_API const ggml_tensor * llama_get_dflash_gpu_features(struct llama_context * ctx);
+LLAMA_API int32_t llama_process_dflash_gpu_features(struct llama_context * draft, struct llama_context * target,
+        struct llama_batch_ext * batch, size_t offset);
+
 LLAMA_API llama_context * llama_get_ctx_other(struct llama_context * ctx);
 
 //

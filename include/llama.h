@@ -1163,6 +1163,13 @@ extern "C" {
     // otherwise: float[n_embd] (1-dimensional)
     LLAMA_API float * llama_get_embeddings_seq(struct llama_context * ctx, llama_seq_id seq_id);
 
+    // Opt-in DFlash2 GPU selection for one sequence, p_min = 0, and a complete noise block.
+    // Returns false when the context/backend cannot support it. No CPU selection is used after enabling.
+    LLAMA_API bool llama_set_dflash2_gpu_select(struct llama_context * ctx, int32_t block_size);
+    // One token ID per noise row; the anchor row is LLAMA_TOKEN_NULL. Valid until the next process call.
+    // Returns NULL when the last process call did not select a complete block.
+    LLAMA_API const llama_token * llama_get_dflash2_tokens(struct llama_context * ctx);
+
     //
     // backend sampling API [EXPERIMENTAL]
     // note: use only if the llama_context was created with at least one llama_sampler_seq_config

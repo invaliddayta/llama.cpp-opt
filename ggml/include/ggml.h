@@ -601,6 +601,10 @@ extern "C" {
 
         GGML_OP_GLU,
 
+        GGML_OP_GRAMMAR_MASK,
+        GGML_OP_GPU_UNIFORM,
+        GGML_OP_GPU_SAMPLE_CHECK,
+
         GGML_OP_COUNT,
     };
 
@@ -766,6 +770,16 @@ extern "C" {
 
     GGML_API const char * ggml_type_name(enum ggml_type type);
     GGML_API const char * ggml_op_name  (enum ggml_op   op);
+
+    GGML_API struct ggml_tensor * ggml_grammar_mask(
+            struct ggml_context * ctx, struct ggml_tensor * logits, struct ggml_tensor * tables,
+            struct ggml_tensor * state, struct ggml_tensor * pending, struct ggml_tensor * previous);
+    GGML_API struct ggml_tensor * ggml_gpu_uniform(
+            struct ggml_context * ctx, struct ggml_tensor * dependency, struct ggml_tensor * tables,
+            struct ggml_tensor * state);
+    GGML_API struct ggml_tensor * ggml_gpu_sample_check(
+            struct ggml_context * ctx, struct ggml_tensor * sampled, struct ggml_tensor * state,
+            struct ggml_tensor * selected_logit, int32_t n_vocab);
     GGML_API const char * ggml_op_symbol(enum ggml_op   op);
 
     GGML_API const char * ggml_unary_op_name(enum ggml_unary_op op);

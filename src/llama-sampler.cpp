@@ -3,6 +3,7 @@
 #include "llama-impl.h"
 #include "llama-vocab.h"
 #include "llama-grammar.h"
+#include "llama-gpu-sampling.h"
 
 #include "ggml-cpp.h"
 
@@ -764,8 +765,21 @@ static bool llama_sampler_chain_backend_init(
         res = res && cur_prefix;
     }
 
+    if (!res && llama_gpu_sampling_enabled()) {
+        throw std::runtime_error("GPU sampling: the whole sampler chain must run on CUDA; CPU fallback is forbidden");
+    }
+
     auto probe = llama_sampler_backend_probe_graph(smpl, 128*1024, GGML_DEFAULT_GRAPH_SIZE, false);
     chain->n_nodes = llama_sampler_backend_probe_n_nodes(probe);
+
+    if (llama_gpu_sampling_enabled()) {
+        auto * device = ggml_backend_buft_get_device(buft);
+        for (int i = 0; i < ggml_graph_n_nodes(probe.gf); ++i) {
+            if (!device || !ggml_backend_dev_supports_op(device, ggml_graph_node(probe.gf, i))) {
+                throw std::runtime_error("GPU sampling: unsupported backend graph operation");
+            }
+        }
+    }
 
     return res;
 }
@@ -1260,7 +1274,7 @@ static bool llama_sampler_dist_backend_init(
         uint32_t                     n_outputs_max_per_seq) {
     auto * sctx = (llama_sampler_dist *) smpl->ctx;
 
-    const bool res = llama_sampler_backend_support(smpl, buft);
+    const bool res = llama_gpu_sampling_enabled() || llama_sampler_backend_support(smpl, buft);
 
     sctx->init(res);
     sctx->backend_transactional = n_outputs_max_per_seq > 1;
@@ -1280,10 +1294,25 @@ static void llama_sampler_dist_backend_apply(
 
     auto * sctx = (llama_sampler_dist *) smpl->ctx;
 
-    ggml_tensor * inp_uniform = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
-    ggml_format_name(inp_uniform, "uniform_%zu", sctx->inp_uniforms.size());
-    ggml_set_input(inp_uniform);
-    sctx->inp_uniforms.push_back(inp_uniform);
+    ggml_tensor * grammar_stage = nullptr;
+    ggml_tensor * inp_uniform = nullptr;
+    if (llama_gpu_sampling_enabled()) {
+        std::vector<ggml_tensor *> todo{data->logits};
+        std::unordered_map<ggml_tensor *, bool> seen;
+        while (!todo.empty() && seen.size() < 1024) {
+            auto * t = todo.back(); todo.pop_back();
+            if (!t || !seen.emplace(t, true).second) continue;
+            if (t->op == GGML_OP_GRAMMAR_MASK) { grammar_stage = t; break; }
+            for (auto * source : t->src) if (source) todo.push_back(source);
+        }
+        if (!grammar_stage) throw std::runtime_error("GPU sampling: device grammar/counter stage is missing");
+        inp_uniform = ggml_gpu_uniform(ctx, data->logits, grammar_stage->src[1], grammar_stage->src[2]);
+    } else {
+        inp_uniform = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+        ggml_format_name(inp_uniform, "uniform_%zu", sctx->inp_uniforms.size());
+        ggml_set_input(inp_uniform);
+        sctx->inp_uniforms.push_back(inp_uniform);
+    }
 
     // flatten
     struct ggml_tensor * logits = ggml_reshape_1d(ctx, data->logits, ggml_nelements(data->logits));
@@ -1333,10 +1362,19 @@ static void llama_sampler_dist_backend_apply(
 
     data->sampled = sampled_token;
     data->probs = probs;
+    if (grammar_stage) {
+        data->sampled = ggml_gpu_sample_check(ctx, sampled_token, grammar_stage->src[2],
+            ggml_get_rows(ctx, ggml_reshape_2d(ctx, logits, 1, ggml_nelements(logits)), idx), grammar_stage->ne[0]);
+        data->logits = nullptr;
+        data->probs = nullptr;
+        data->candidates = nullptr;
+    }
 }
 
 static void llama_sampler_dist_backend_set_input(struct llama_sampler * smpl) {
     auto * sctx = (llama_sampler_dist *) smpl->ctx;
+
+    if (llama_gpu_sampling_enabled()) return;
 
     GGML_ASSERT(!sctx->inp_uniforms.empty());
 
@@ -1370,6 +1408,8 @@ static void llama_sampler_dist_accept(struct llama_sampler * smpl, llama_token t
     GGML_UNUSED(token);
 
     auto * sctx = (llama_sampler_dist *) smpl->ctx;
+
+    if (llama_gpu_sampling_enabled()) return;
 
     if (!sctx->backend_transactional ||
             sctx->n_backend_draws_committed >= sctx->n_backend_draws_generated) {
@@ -1426,6 +1466,7 @@ void llama_sampler_backend_begin(llama_sampler * sampler) {
             llama_sampler_backend_begin(entry.ptr);
         }
     } else if (sampler->iface == &llama_sampler_dist_i) {
+        if (llama_gpu_sampling_enabled()) return;
         auto * ctx = (llama_sampler_dist *) sampler->ctx;
         if (ctx->backend_transactional) {
             ctx->rng_backend = ctx->rng;
