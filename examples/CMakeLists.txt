@@ -34,7 +34,6 @@ else()
     add_subdirectory(gen-docs)
     add_subdirectory(training)
     add_subdirectory(diffusion)
-    add_subdirectory(dflash-dump)
     if (NOT GGML_BACKEND_DL)
         add_subdirectory(convert-llama2c-to-ggml)
         # these examples use the backends directly and cannot be built with dynamic loading

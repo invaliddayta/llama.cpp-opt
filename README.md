@@ -103,10 +103,8 @@ kernels, and every opt-in leaves the upstream path untouched when off.
 `opt/main` is a linear series on top of `upstream-base`. The whole difference as one patch:
 
 ```sh
-git diff upstream-base opt/main -- . ':!examples' ':!README.md' ':!media/llama-cpp-opt.svg'
+git diff upstream-base opt/main -- . ':!README.md' ':!media/llama-cpp-opt.svg'
 ```
-
-`examples/dflash-dump` holds fork-only tools for draft-model training and is left out.
 
 ## License
 
