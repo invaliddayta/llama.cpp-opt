@@ -37,7 +37,7 @@ Benchmarks, kernel labs and design notes are in
 | **DFlash features** | Target features for the DFlash2 draft stay in a CUDA staging tensor | No host round trip per step |
 | **Small kernels** | Small top-k, conv-state snapshot fusion, small F32 matmul | Fewer, cheaper launches |
 | **Sleep cache** | Server snapshots KV and recurrent state to disk on idle unload and restores it on wake | Long contexts survive idle sleep |
-| **Race fix** | Write-after-read race on `KQ` in `flash_attn_ext_vec` (also in upstream) | racecheck 2.2M hazards -> 0 |
+| **Race fix** | Write-after-read race on `KQ` in `flash_attn_ext_vec` (fixed upstream in [#30573](https://github.com/ggml-org/llama.cpp/pull/30573), after `upstream-base`) | racecheck 2.2M hazards -> 0 |
 
 GPU sampling falls back to standard sampling for any request it can't serve (penalties,
 logprobs, reasoning budget, regex triggers), so no request is rejected.
