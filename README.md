@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="#whats-different">What's different</a> &middot; <a href="#tested-with">Tested with</a> &middot; <a href="#build">Build</a> &middot; <a href="#switches">Switches</a> &middot; <a href="https://github.com/invaliddayta/llm-opt">Benchmarks and notes</a> &middot; <a href="https://github.com/ggml-org/llama.cpp">Upstream llama.cpp</a>
+  <a href="#whats-different">What's different</a> &middot; <a href="#tested-with">Tested with</a> &middot; <a href="#build">Build</a> &middot; <a href="#switches">Switches</a> &middot; <a href="https://github.com/ggml-org/llama.cpp">Upstream llama.cpp</a>
 </p>
 
 This is [llama.cpp](https://github.com/ggml-org/llama.cpp) at upstream `8df332de1` (tag
@@ -23,8 +23,6 @@ RTX 3090, verifying 8 tokens per step at long context. On that setup a verify st
 
 Everything else is upstream llama.cpp. Its documentation lives in [docs/](docs/), with
 [build instructions](docs/build.md) and the [server README](tools/server/README.md).
-Benchmarks, kernel labs and design notes are in
-**[llm-opt](https://github.com/invaliddayta/llm-opt)**.
 
 ## What's different
 
@@ -50,15 +48,25 @@ logprobs, reasoning budget, regex triggers), so no request is rejected.
 | Draft | stock `Qwen3.8-27B-DFlash2-Q4_K_M.gguf` ([z-lab/Qwen3.8-27B-DFlash2-GGUF](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2-GGUF) @ `2d9571f8`), 7 drafted + 1 = 8 tokens verified per step |
 | KV cache | target q4_0 for K and V (3.6x smaller than f16, 1.7 GiB at 98K), draft f16 |
 | Context | 98,304 tokens |
-| GPU | RTX 3090 24 GB (sm_86) over USB4 |
+| GPU | RTX 3090 24 GB (sm_86), eGPU on PCIe 4.0 x4 (OCuLink) |
 
 | ms per verify step | explanation | python100 (tools) | story |
 | --- | --- | --- | --- |
 | upstream `8df332de1` | 53.3 | 55.1 | 53.8 |
 | **llama.cpp-opt** | **32.7** | **33.4** | **33.3** |
 
-Same files, flags and sampling, run back to back. Checksums, the full method and more tables:
-[llm-opt](https://github.com/invaliddayta/llm-opt#results).
+Same files, flags and sampling, run back to back. Every fork change since 2026-10-04 keeps the
+output bit-identical, checked by output hashes.
+
+<details>
+<summary>Model SHA-256 and revisions</summary>
+
+```text
+target  034b4c6b7c5cd9f4a2f99570d5097698f9d1e265a0fb000207223cbf9f9bd0b0  rev 993a5971fda8f30dd1b7eb2654792ba4415c7460
+draft   1a25c56858e1ebe93f2718ac1d49d1151f9323325c1bbfd6209370f4db131ebd  rev 2d9571f8ce46e151f61c6499c99dee6079e1d610
+```
+
+</details>
 
 ## Build
 
@@ -79,8 +87,9 @@ build/bin/llama-server -m target-IQ4_XS.gguf --ctx-size 98304 --gpu-layers 999 -
   --spec-draft-n-max 7 --spec-draft-p-min 0 --backend-sampling --jinja
 ```
 
-The full flag set used in benchmarks is in
-[llm-opt `bench/serve_test.sh`](https://github.com/invaliddayta/llm-opt/blob/main/bench/serve_test.sh).
+The benchmarks also used `--parallel 1 --split-mode none --spec-draft-device CUDA0
+--spec-draft-poll 1 --spec-draft-type-k f16 --spec-draft-type-v f16 --threads 12 --threads-batch 16
+--batch-size 2048 --ubatch-size 512 --reasoning-format deepseek --poll 10`.
 
 ## Switches
 
